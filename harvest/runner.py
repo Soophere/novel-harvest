@@ -45,7 +45,7 @@ REMOTE = os.environ.get("RCLONE_REMOTE", "gdrive")
 # --------------------------------------------------------------------------- #
 SITES = {
     "galaxynovels": {
-        "lang": "ar",
+        "lang": "arabic",
         "base": "https://galaxynovels.com",
         "catalogue": {"type": "listing", "url": "https://galaxynovels.com/novels/?page={page}",
                       "re": r'href="(https://galaxynovels\.com/novel/[^"/]+/)"', "max_pages": 500},
@@ -57,7 +57,7 @@ SITES = {
         "delay": 1.0,
     },
     "novltime": {
-        "lang": "ar",
+        "lang": "arabic",
         "base": "https://novltime.com",
         "catalogue": {"type": "json_list", "url": "https://novltime.com/api/v1/novels?page={page}",
                       "items": "data", "slug": "slug", "url_template": "https://novltime.com/ar/novel/{value}",
@@ -71,7 +71,7 @@ SITES = {
         "delay": 0.8,
     },
     "sunovels": {
-        "lang": "ar",
+        "lang": "arabic",
         "base": "https://sunovels.com",
         "catalogue": {"type": "listing", "url": "https://sunovels.com/library?page={page}",
                       "re": r'href="(/novel/[^"/?#]+)"', "max_pages": 600},
@@ -86,7 +86,7 @@ SITES = {
         "delay": 0.9,
     },
     "kolnovel": {
-        "lang": "ar",
+        "lang": "arabic",
         "base": "https://kolnovel.com",
         "catalogue": {"type": "sitemap_index", "url": "https://kolnovel.com/wp-sitemap.xml",
                       "prefix": "https://kolnovel.com/sitemap", "max_pages": 200},
