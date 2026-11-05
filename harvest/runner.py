@@ -79,6 +79,14 @@ def get(url: str, tries: int = 5) -> str | None:
     return None
 
 
+def get_once(url: str) -> str | None:
+    """One attempt, no retries: used for chapter-list pagination, where a 404 means "no more pages"."""
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=25).read().decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
 def rclone(*args: str) -> str:
     cmd = ["rclone", *args, "--config", os.path.expanduser("~/.config/rclone/rclone.conf")]
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -92,10 +100,37 @@ def state_load(key: str) -> dict:
     try:
         return json.loads(out)
     except Exception:
-        return {"done_novels": [], "current": None}
+        return {"done_novels": [], "current": None, "lease": None}
+
+
+def whoami() -> str:
+    import socket
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def claim(key: str, state: dict, minutes: int, workdir: Path, force: bool = False) -> bool:
+    """Let one machine work a site at a time, and let the other take over when the lease expires.
+
+    The flat server and the GitHub runner share the same state file in Drive. Whoever holds a live lease
+    works; if it dies without renewing, the other sees an expired lease and continues from the same chapter.
+    """
+    me = whoami()
+    lease = state.get("lease") or {}
+    now = time.time()
+    if not force and lease.get("owner") and lease["owner"] != me and lease.get("until", 0) > now:
+        left = int((lease["until"] - now) / 60)
+        log("[%s] lease held by %s for %d more min - standing by" % (key, lease["owner"], left))
+        return False
+    state["lease"] = {"owner": me, "until": now + 20 * 60, "beat": now}
+    state_save(key, state, workdir)
+    log("[%s] lease acquired by %s for %d min" % (key, me, minutes))
+    return True
 
 
 def state_save(key: str, state: dict, workdir: Path) -> None:
+    if isinstance(state.get("lease"), dict):
+        state["lease"]["until"] = time.time() + 20 * 60
+        state["lease"]["beat"] = time.time()
     p = workdir / f"{key}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -217,7 +252,7 @@ def chapters_for(cfg: dict, novel_url: str, first_page: str) -> list[str]:
         if not pager or not new or page >= 300:
             break
         page += 1
-        html = get(pager.format(page=page, slug=slug, novel=novel_url.rstrip("/")))
+        html = get_once(pager.format(page=page, slug=slug, novel=novel_url.rstrip("/")))
         if not html:
             break
         time.sleep(0.5)
@@ -230,7 +265,7 @@ def chapters_for(cfg: dict, novel_url: str, first_page: str) -> list[str]:
     return collected
 
 
-def harvest(site: str, cfg: dict, budget_min: int, worker: int = 0, of: int = 1, limit_novels: int = 0) -> None:
+def harvest(site: str, cfg: dict, budget_min: int, worker: int = 0, of: int = 1, limit_novels: int = 0, force: bool = False) -> None:
     workdir = Path("/tmp/work")
     novel_dir = workdir / site
     novel_dir.mkdir(parents=True, exist_ok=True)
@@ -238,6 +273,8 @@ def harvest(site: str, cfg: dict, budget_min: int, worker: int = 0, of: int = 1,
 
     key = f"{site}-{worker}of{of}"
     state = state_load(key)
+    if not claim(key, state, 20, workdir, force=force):
+        return
     done = set(state.get("done_novels", []))
     crawl_until = time.time() + budget_min * 60 * 0.2
     novels = catalogue(cfg, workdir, site, crawl_until)
@@ -322,6 +359,8 @@ def harvest(site: str, cfg: dict, budget_min: int, worker: int = 0, of: int = 1,
         log(f"[{site}] novel done: {slug} ({len(links)} chapters) · total written {written}")
 
     push(site, cfg["lang"], workdir)
+    state["lease"] = {"owner": None, "until": 0, "beat": time.time()}
+    state_save(key, state, workdir)
     log(f"[{site}] run finished · written {written} · novels done {len(done)}/{len(novels)}")
 
 
@@ -331,5 +370,6 @@ ap.add_argument("--budget-min", type=int, default=300)
 ap.add_argument("--worker", type=int, default=0)
 ap.add_argument("--of", type=int, default=1)
 ap.add_argument("--limit-novels", type=int, default=0)
+ap.add_argument("--force", action="store_true", help="take the lease even if another machine holds it")
 args = ap.parse_args()
-harvest(args.site, SITES[args.site], args.budget_min, args.worker, args.of, args.limit_novels)
+harvest(args.site, SITES[args.site], args.budget_min, args.worker, args.of, args.limit_novels, args.force)
