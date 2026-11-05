@@ -619,6 +619,11 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
         for i in range(start_from - 1, len(links)):
             if time.time() > deadline:
                 state["current"] = {"novel": novel_url, "chapter": i + 1}
+                # Release the lease on the way out. state_save renews it, and a worker that has stopped
+                # must not hold the site: the next run stands by three minutes, sees a live lease and
+                # skips the site entirely. That cost run 42113881975 its whole galaxynovels share.
+                state_save(key, state, workdir)
+                state["lease"] = {"owner": None, "until": 0, "beat": time.time()}
                 state_save(key, state, workdir)
                 push(site, cfg["lang"], workdir)
                 log(f"[{site}] budget reached mid-novel {slug} at chapter {i + 1}")
