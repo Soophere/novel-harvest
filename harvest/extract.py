@@ -145,3 +145,90 @@ def text_in_class(raw: str, needle: str) -> str:
         if len(txt) > len(best):
             best = txt
     return best
+
+# --------------------------------------------------------------------------- #
+# Paragraph mode: the robust default for modern sites
+# --------------------------------------------------------------------------- #
+class _ParaCollector(HTMLParser):
+    """Group <p> text by the nearest ancestor that carries a class or id.
+
+    Modern sites (WordPress/Madara, Tailwind, Astro) put the story in plain <p> tags inside one container,
+    and navigation in <a>/<li>. Measured by total paragraph characters, the story container wins by an
+    order of magnitude, and choosing paragraphs instead of a whole block drops the menu, the breadcrumb and
+    the "Prev / Next" row without any per-site selector.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []          # list of (tag, key)
+        self.skip = 0
+        self.in_p = 0
+        self.buf = []
+        self.groups = {}         # key -> list of paragraph strings
+        self.order = []          # key order of first appearance
+
+    @staticmethod
+    def _key(tag, attrs):
+        a = dict(attrs)
+        if a.get("class"):
+            return tag + "." + a["class"].split()[0]
+        if a.get("id"):
+            return tag + "#" + a["id"]
+        return None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript", "svg"):
+            self.skip += 1
+            return
+        if tag == "p":
+            self.in_p += 1
+            self.buf = []
+        self.stack.append((tag, self._key(tag, attrs)))
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript", "svg"):
+            self.skip = max(0, self.skip - 1)
+            return
+        if tag == "p" and self.in_p:
+            self.in_p -= 1
+            text = re.sub(r"\s+", " ", "".join(self.buf)).strip()
+            self.buf = []
+            if len(text) >= 2:
+                key = None
+                for t, k in reversed(self.stack):
+                    if k:
+                        key = k
+                        break
+                key = key or "root"
+                if key not in self.groups:
+                    self.groups[key] = []
+                    self.order.append(key)
+                self.groups[key].append(text)
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                break
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        if self.in_p:
+            self.buf.append(data)
+
+
+def best_paragraphs(raw: str) -> str:
+    """Return the story as newline-separated paragraphs, or "" when the page has too few <p> tags."""
+    p = _ParaCollector()
+    try:
+        p.feed(raw)
+    except Exception:
+        pass
+    best, best_n = "", 0
+    for key in p.order:
+        paras = p.groups[key]
+        n = sum(len(x) for x in paras)
+        if n > best_n:
+            best_n, best = n, paras
+    if len(best) < 3 or best_n < 400:
+        return ""
+    return "\n\n".join(best)

@@ -1,0 +1,19 @@
+# secrets — never commit
+.access-pass.txt
+
+# harvested novels live in Google Drive (hundreds of thousands of tiny files), not in git
+novels/
+out/
+data/
+experiments/
+fixes/
+graphify-out/
+library.db
+
+# python
+__pycache__/
+*.pyc
+
+# local scratch
+.tmp-*
+*.log
