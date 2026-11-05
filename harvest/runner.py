@@ -64,7 +64,8 @@ SITES = {
                       "max_pages": 120},
         "chapter_style": "numeric",
         "chapter_url": "https://novltime.com/ar/novel/{slug}/chapter/chapter-{n}",
-        "text_class": "font-serif",
+        # the class this site uses is on every wrapper, so it drags the header in: paragraphs are clean
+        "text_class": "",
         "delay": 0.8,
     },
     "sunovels": {
