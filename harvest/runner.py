@@ -44,7 +44,7 @@ SITES = {
     "fanmtl": {
         "lang": "en", "base": "https://www.fanmtl.com",
         "catalogue": {"type": "listing", "url": "https://www.fanmtl.com/list/all/all-onclick-{page}.html",
-                      "re": r'href="(/novel/[a-z0-9\-]+\.html)"', "max_pages": 300},
+                      "re": r'href="(/novel/[a-z0-9\-]+\.html)"', "max_pages": 1200},
         "skip_re": r"_\d+\.html$",
         "chapter_style": "sequential",   # /novel/<slug>_<n>.html
         "text_class": "chapter-content",
@@ -112,24 +112,43 @@ def slugify(u: str) -> str:
     return re.sub(r"[^A-Za-z0-9_\-\u0600-\u06FF]+", "-", tail)[:70] or "novel"
 
 
-def catalogue(cfg: dict, workdir: Path, site: str) -> list[str]:
-    """Prefer a catalogue already in Drive; build it only when missing."""
+def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = None) -> list[str]:
+    """Load the catalogue from Drive and, if there is time, crawl a few more pages.
+
+    A site like fanmtl lists ~9,000 novels at 30 per page, so building the whole list costs more time
+    than one runner has. The crawl therefore saves its page cursor and continues on the next run, while
+    harvesting already works from the part that is known.
+    """
     p = workdir / f"catalogue-{site}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     rclone("copyto", f"{REMOTE}:novels/catalogue/{site}.json", str(p))
+    data = {"site": site, "built": None, "novels": [], "done": False, "next_page": 1}
     if p.exists():
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if data.get("novels"):
-                log(f"[{site}] catalogue from Drive: {len(data['novels'])} novels")
-                return data["novels"]
+            data.update(json.loads(p.read_text(encoding="utf-8")))
         except Exception:
             pass
+    novels = data.get("novels") or []
+    if novels:
+        log(f"[{site}] catalogue: {len(novels)} novels known, next page {data.get('next_page')}, done={data.get('done')}")
+
     c = cfg["catalogue"]
-    novels = []
-    if c["type"] == "listing":
-        page = 1
-        while page <= c.get("max_pages", 100):
+    if c["type"] == "sitemap":
+        if not novels:
+            raw = get(c["url"]) or ""
+            prefix = c.get("prefix", "")
+            for loc in re.findall(r"<loc>([^<]+)</loc>", raw):
+                if loc.startswith(prefix) and loc.rstrip("/") != prefix.rstrip("/"):
+                    novels.append(loc)
+            data["done"] = True
+            log(f"   sitemap: {len(novels)} novels")
+    elif not data.get("done"):
+        page = int(data.get("next_page") or 1)
+        seen = set(novels)
+        while page <= c.get("max_pages", 1000):
+            if crawl_until and time.time() > crawl_until:
+                log(f"   catalogue: time up at page {page} (keeping {len(novels)})")
+                break
             raw = get(c["url"].format(page=page))
             if not raw:
                 break
@@ -137,23 +156,24 @@ def catalogue(cfg: dict, workdir: Path, site: str) -> list[str]:
             if c.get("skip_re"):
                 found = [f for f in found if not re.search(c["skip_re"], f)]
             found = [f if f.startswith("http") else cfg["base"] + f for f in found]
-            new = [f for f in dict.fromkeys(found) if f not in novels]
-            novels.extend(new)
-            log(f"   catalogue page {page}: +{len(new)} (total {len(novels)})")
+            new = [f for f in dict.fromkeys(found) if f not in seen]
             if not new:
+                data["done"] = True
+                log(f"   catalogue finished at page {page} (total {len(novels)})")
                 break
+            novels.extend(new)
+            seen.update(new)
             page += 1
-            time.sleep(1.0)
-    else:
-        if c["type"] == "sitemap":
-            raw = get(c["url"]) or ""
-            prefix = c.get("prefix", "")
-            for loc in re.findall(r"<loc>([^<]+)</loc>", raw):
-                if loc.startswith(prefix) and loc.rstrip("/") != prefix.rstrip("/"):
-                    novels.append(loc)
-            log(f"   sitemap: {len(novels)} novels")
-    p.write_text(json.dumps({"site": site, "built": time.strftime("%Y-%m-%d %H:%M:%S"), "novels": novels},
-                            ensure_ascii=False, indent=1), encoding="utf-8")
+            data["next_page"] = page
+            if page % 25 == 0:
+                log(f"   catalogue page {page}: total {len(novels)}")
+                data["novels"] = novels
+                p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+                rclone("copyto", str(p), f"{REMOTE}:novels/catalogue/{site}.json")
+            time.sleep(0.6)
+
+    data.update({"novels": novels, "built": time.strftime("%Y-%m-%d %H:%M:%S")})
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     rclone("copyto", str(p), f"{REMOTE}:novels/catalogue/{site}.json")
     return novels
 
@@ -187,7 +207,9 @@ def harvest(site: str, cfg: dict, budget_min: int) -> None:
 
     state = state_load(site)
     done = set(state.get("done_novels", []))
-    novels = catalogue(cfg, workdir, site)
+    # 30% of the budget may go to growing the catalogue, the rest to actual chapters
+    crawl_until = time.time() + budget_min * 60 * 0.3
+    novels = catalogue(cfg, workdir, site, crawl_until)
     todo = [n for n in novels if n not in done]
     log(f"[{site}] {len(novels)} novels · {len(todo)} left · budget {budget_min} min")
 
