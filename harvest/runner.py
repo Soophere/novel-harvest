@@ -95,7 +95,7 @@ def state_save(site: str, state: dict, workdir: Path) -> None:
     p = workdir / f"{site}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
-    rclone("copyto", str(p), f"{REMOTE}:novels/state/{site}.json")
+    rclone("copyto", str(p), f"{REMOTE}:novels/state/{key}.json")
 
 
 def push(site: str, lang: str, workdir: Path) -> None:
@@ -199,21 +199,21 @@ def chapters_for(cfg: dict, novel_url: str, page: str) -> list[str]:
     return out
 
 
-def harvest(site: str, cfg: dict, budget_min: int) -> None:
+def harvest(site: str, cfg: dict, budget_min: int, worker: int = 0, of: int = 1) -> None:
     workdir = Path("/tmp/work")
     novel_dir = workdir / site
     novel_dir.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + budget_min * 60
 
-    state = state_load(site)
+    key = f"{site}-{worker}of{of}"
+    state = state_load(key)
     done = set(state.get("done_novels", []))
-    # 30% of the budget may go to growing the catalogue, the rest to actual chapters
-    crawl_until = time.time() + budget_min * 60 * 0.3
+    # a fifth of the budget may grow the catalogue, the rest downloads chapters
+    crawl_until = time.time() + budget_min * 60 * 0.2
     novels = catalogue(cfg, workdir, site, crawl_until)
+    if of > 1:
+        novels = novels[worker::of]
     todo = [n for n in novels if n not in done]
-    log(f"[{site}] {len(novels)} novels · {len(todo)} left · budget {budget_min} min")
-
-    written = 0
     last_push = time.time()
 
     for novel_url in todo:
@@ -245,7 +245,7 @@ def harvest(site: str, cfg: dict, budget_min: int) -> None:
         for i in range(start_from - 1, len(links)):
             if time.time() > deadline:
                 state["current"] = {"novel": novel_url, "chapter": i + 1}
-                state_save(site, state, workdir)
+                state_save(key, state, workdir)
                 push(site, cfg["lang"], workdir)
                 log(f"[{site}] budget reached mid-novel {slug} at chapter {i + 1}")
                 return
@@ -271,7 +271,7 @@ def harvest(site: str, cfg: dict, budget_min: int) -> None:
                                                     ensure_ascii=False, indent=1), encoding="utf-8")
                 push(site, cfg["lang"], workdir)
                 state["current"] = {"novel": novel_url, "chapter": i + 2}
-                state_save(site, state, workdir)
+                state_save(key, state, workdir)
                 last_push = time.time()
                 log(f"[{site}] pushed {written} so far (at {slug} ch{i + 1})")
 
@@ -281,7 +281,7 @@ def harvest(site: str, cfg: dict, budget_min: int) -> None:
         done.add(novel_url)
         state["done_novels"] = sorted(done)
         state["current"] = None
-        state_save(site, state, workdir)
+        state_save(key, state, workdir)
         push(site, cfg["lang"], workdir)
         last_push = time.time()
         log(f"[{site}] novel done: {slug} ({len(links)} chapters) · total written {written}")
