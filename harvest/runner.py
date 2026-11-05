@@ -252,6 +252,30 @@ def push(site: str, lang: str, workdir: Path) -> None:
                "--fast-list", "--ignore-existing")
 
 
+def migrate_legacy_lang(site: str, lang: str) -> None:
+    """Move a site out of the old novels/ar/ tree.
+
+    The lang field was "ar" while the documented tree is arabic/, so three Arabic sites harvested correctly
+    into a folder nothing reads. The home server cannot do the copy — its uplink stalls on Drive — but the
+    runner can, so it heals the tree on every run until there is nothing left to move.
+    """
+    if lang == "ar":
+        return
+    legacy = f"{REMOTE}:novels/ar/{site}"
+    if not rclone("lsf", legacy, "--dirs-only", "--max-depth", "1").strip():
+        return
+    log(f"[{site}] migrating legacy novels/ar/{site} -> novels/{lang}/{site}")
+    rclone("copy", legacy, f"{REMOTE}:novels/{lang}/{site}",
+           "--transfers", "4", "--checkers", "8", "--tpslimit", "8")
+    src = len(rclone("lsf", legacy, "-R", "--files-only").splitlines())
+    dst = len(rclone("lsf", f"{REMOTE}:novels/{lang}/{site}", "-R", "--files-only").splitlines())
+    if dst >= src:
+        rclone("purge", legacy)
+        log(f"[{site}] migrated {src} files, legacy folder removed")
+    else:
+        log(f"[{site}] migration incomplete ({dst}/{src}) - keeping both, will retry next run")
+
+
 def write_site_manifest(site: str, cfg: dict, workdir: Path, novels_known: int) -> None:
     """novels/<lang>/<site>/_site.json — what this folder is and how it was built."""
     src = workdir / site
@@ -543,6 +567,7 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
     state = claim(key, workdir, wait_min=budget_min if wait_min is None else wait_min, force=force)
     if state is None:
         return
+    migrate_legacy_lang(site, cfg["lang"])
     done = set(state.get("done_novels", []))
     crawl_until = time.time() + budget_min * 60 * 0.2
     if hard_deadline:

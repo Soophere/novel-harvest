@@ -216,6 +216,15 @@ file changes must be made through the GitHub web UI, or fix it once with
    20 % and the cursor persists.
 10. **Truncated data must be deleted, not merged** — file numbers map to positions in the chapter list; if the
     list was wrong, the whole folder is wrong.
+11. **`lang` was `"ar"`, the tree is `arabic/`** — every Arabic site pushed into a parallel `novels/ar/`
+    tree that nothing reads. galaxynovels, novltime and sunovels were all harvesting correctly into a folder
+    nobody would look at. Found only by listing Drive after a run and asking where the files were.
+    Symptom to remember: *job logs say "novel done", the documented folder stays empty.*
+12. **A catalogue built by a different rule is poison** — wuxiaworldsite's catalogue still held 9,981
+    *chapter* URLs from the old sitemap builder. Each one fetched a page with no chapter list, the novel
+    was written off, and 19 novels vanished from the run. `catalogue_bad_re` now detects it and rebuilds.
+13. **"No chapters found" is not "novel finished"** — it is usually a bug upstream. A novel is retried three
+    times before it is written off, and it never lands in `done_novels` on the first failure.
 
 ---
 
