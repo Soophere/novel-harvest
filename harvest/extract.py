@@ -216,6 +216,15 @@ class _ParaCollector(HTMLParser):
             self.buf.append(data)
 
 
+# Paragraphs that are site furniture, not story. Kept short and exact: a false match would delete a line
+# of dialogue, so only strings that cannot be dialogue are listed.
+NOISE = {
+    "الفصل التالي", "الفصل السابق", "التالي", "السابق", "الفصل السابق التالي",
+    "next chapter", "previous chapter", "prev chapter", "next", "prev", "back to list",
+    "chapter list", "table of contents", "report error", "share", "comments",
+}
+
+
 def best_paragraphs(raw: str) -> str:
     """Return the story as newline-separated paragraphs, or "" when the page has too few <p> tags."""
     p = _ParaCollector()
@@ -223,12 +232,17 @@ def best_paragraphs(raw: str) -> str:
         p.feed(raw)
     except Exception:
         pass
+    # score by *prose*: a navigation block is many short paragraphs and out-totals the story otherwise
+    # ("next chapter" / "previous" rows are links, and links are short lines)
     best, best_n = "", 0
     for key in p.order:
         paras = p.groups[key]
-        n = sum(len(x) for x in paras)
+        n = sum(len(x) for x in paras if len(x) > 40)
         if n > best_n:
             best_n, best = n, paras
     if len(best) < 3 or best_n < 400:
         return ""
-    return "\n\n".join(best)
+    cleaned = [x for x in best if x.strip().lower() not in NOISE]
+    if len(cleaned) < 3:
+        cleaned = best
+    return "\n\n".join(cleaned)

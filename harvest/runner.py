@@ -64,6 +64,8 @@ SITES = {
                       "max_pages": 120},
         "chapter_style": "numeric",
         "chapter_url": "https://novltime.com/ar/novel/{slug}/chapter/chapter-{n}",
+        # the chapter page says "الفصل 1 من 50"; that beats anything the novel page renders
+        "chapter_total_re": r"الفصل\s*\d+\s*من\s*(\d+)",
         # the class this site uses is on every wrapper, so it drags the header in: paragraphs are clean
         "text_class": "",
         "delay": 0.8,
@@ -435,6 +437,8 @@ def chapters_for(cfg: dict, novel_url: str, first_page: str) -> list[str]:
     # numeric: the page renders only the newest ~120 links, but chapter URLs are chapter-{n}
     if style == "numeric":
         nums = [int(n) for n in re.findall(r"/chapter-(\d+)", first_page)]
+        if cfg.get("chapter_total_re"):
+            nums += [int(n) for n in re.findall(cfg["chapter_total_re"], first_page)]
         if not nums:
             return []
         return [cfg["chapter_url"].format(slug=slug, n=i) for i in range(1, max(nums) + 1)]
