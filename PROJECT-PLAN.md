@@ -1,6 +1,6 @@
 # PROJECT PLAN — from "two novels" to "a library"
 
-Status as of 2026-11-05. Phases are ordered; each has a hard definition of done.
+Status as of 2026-11-06. Phases are ordered; each has a hard definition of done.
 
 ---
 
@@ -24,15 +24,18 @@ Definition of done: every site has `novels/<lang>/<site>/<novel>/NNNN.txt`, a `_
 
 | step | site | method | state |
 |---|---|---|---|
-| 1.1 | galaxynovels | HTTP + `?chapter_page=N` | ✅ works, needs clean re-harvest |
-| 1.2 | fanmtl | HTTP + `/e/extend/fy.php` pager | 🟡 wired, depth unverified |
-| 1.3 | wuxiaworld.site | HTTP + sitemap catalogue | 🟡 wired, depth unverified |
-| 1.4 | novelfire | **lncrawl** (supported) | ⬜ |
-| 1.5 | novelcool | **lncrawl** (supported) | ⬜ |
-| 1.6 | sunovels | **lncrawl** (supported) | ⬜ |
-| 1.7 | novltime | browser (API needs auth) — verify depth first | 🟡 partial |
-| 1.8 | mknov | unusable text output — skip unless proven | ⬜ |
-| 1.9 | wuxiadreams | JS — browser or lncrawl if a source exists | ⬜ |
+| 1.1 | galaxynovels | HTTP + `?chapter_page=N`, sorted by chapter number | ✅ re-harvesting (3,236-chapter novel verified) |
+| 1.2 | fanmtl | HTTP + `/e/extend/fy.php` pager | ✅ verified 1,736 chapters |
+| 1.3 | wuxiaworld.site | POST `<novel>/ajax/chapters/` (Madara) | ✅ verified 3,864 chapters |
+| 1.4 | novelfire | HTTP, text from the novelphoenix.com mirror | ✅ verified 869 chapters |
+| 1.5 | novelcool | chapter list is JavaScript | ❌ still open |
+| 1.6 | sunovels | HTTP, `?activeTab=chapters` | ✅ verified 1,537 chapters |
+| 1.7 | novltime | HTTP, API catalogue + `chapter-{n}` enumeration | ✅ verified 750 chapters |
+| 1.8 | mknov | unusable text output — dropped on purpose | ⛔ dropped |
+| 1.9 | wuxiadreams | HTTP Astro site, 100 chapters per page | ✅ verified 1,200 chapters |
+
+Nine of ten sites are wired (mknov dropped, novelcool open). Nothing needs a browser.
+Every site is proven by `python tools/verify-site.py --site <s> --url <novel>` before it runs wide.
 
 **Rule:** a site is "done" only when one novel has its full chapter count, verified against the site.
 
@@ -40,8 +43,9 @@ Definition of done: every site has `novels/<lang>/<site>/<novel>/NNNN.txt`, a `_
 
 ## Phase 2 — Labels and searchability (SMALL, DO FIRST AFTER PHASE 1)
 
-- `novels/README.md` (tree + conventions) and `novels/<lang>/<site>/_site.json`
-  `{site, language, url, method, novels, chapters, built}`
+- ✅ `novels/README.md` (tree + conventions + the lease rule) is uploaded to Drive
+- ✅ `novels/<lang>/<site>/_site.json` `{site, language, url, method, novels, chapters, built}` is written
+  by the runner at the end of every successful site run
 - `python tools/index-library.py --root novels --db library.db` → SQLite FTS5 index
 - `python tools/find.py "…"` for searching passages across every translation
 
@@ -52,7 +56,9 @@ came from.
 
 ## Phase 3 — Pair novels across languages (ENABLES PIPELINE B)
 
-- Build `pairs.json`: for each English novel, does an Arabic version exist (fuzzy match on title/slug)?
+- ✅ `tools/build-pairs.py` — 150 pairs found (fanmtl English × galaxynovels Arabic)
+- ✅ Output `pairs.json` `{novel, en:[{site,url}], ar:[{site,url}]}`
+- Next: add novltime and sunovels catalogues to the input so the Arabic side is not only galaxynovels
 - Output a report: matched / only-EN / only-AR, with chapter counts on each side.
 - Definition of done: a list of N novels where both texts exist, with coverage %.
 
@@ -63,7 +69,13 @@ came from.
 Method (his idea): give the model the published Arabic chapter **and** the English source, ask for an improved
 Arabic version that keeps his voice rules.
 
-- Start with **5 chapters from one paired novel**, produce a before/after review sheet
+- ✅ `tools/improve-pass.py`: paragraph chunks of 6 against the matching English, `style-rules.json`
+  applied, one review pass against the English, review sheet + metrics per chapter
+- ✅ Proven on Shadow Slave ch1 (wuxiadreams EN × novltime AR): 97→97 paragraphs, 89 changed (92 %),
+  «كان/كانت» 26.3→24.5 per 1000 words, **$0.0152** measured from the API usage — about 5× the $0.003 target,
+  because it reads the English and writes Arabic twice per chapter
+- Open: 5 chapters of one pair, his corrections, then scale
+- Original step, still valid: **5 chapters from one paired novel**, produce a before/after review sheet
   (his correction column, per `tools/review-n2.py` format)
 - Feed his corrections into `LESSONS.md` / glossary
 - Cost target: ~$0.003/chapter; a 300-chapter novel ≈ $1
