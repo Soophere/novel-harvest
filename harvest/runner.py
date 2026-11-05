@@ -214,8 +214,9 @@ def harvest(site: str, cfg: dict, budget_min: int, worker: int = 0, of: int = 1)
     if of > 1:
         novels = novels[worker::of]
     todo = [n for n in novels if n not in done]
+    log(f"[{site}] catalogue {len(novels)} · todo {len(todo)} · budget {budget_min} min")
+    written = 0
     last_push = time.time()
-
     for novel_url in todo:
         if time.time() > deadline:
             log(f"[{site}] budget reached")
