@@ -83,16 +83,16 @@ def rclone(*args: str, check: bool = False) -> str:
     return r.stdout
 
 
-def state_load(site: str) -> dict:
-    out = rclone("cat", f"{REMOTE}:novels/state/{site}.json")
+def state_load(key: str) -> dict:
+    out = rclone("cat", f"{REMOTE}:novels/state/{key}.json")
     try:
         return json.loads(out)
     except Exception:
         return {"done_novels": [], "current": None}
 
 
-def state_save(site: str, state: dict, workdir: Path) -> None:
-    p = workdir / f"{site}.json"
+def state_save(key: str, state: dict, workdir: Path) -> None:
+    p = workdir / f"{key}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
     rclone("copyto", str(p), f"{REMOTE}:novels/state/{key}.json")
