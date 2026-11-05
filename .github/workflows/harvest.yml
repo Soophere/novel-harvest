@@ -2,17 +2,17 @@ name: harvest
 
 on:
   schedule:
-    - cron: "15 */6 * * *"
+    - cron: "20 */6 * * *"
   workflow_dispatch:
     inputs:
       site:
-        description: "single site to run (empty = all)"
+        description: "site name, or empty for all"
         required: false
         default: ""
       budget:
         description: "minutes of harvesting"
         required: false
-        default: "300"
+        default: "330"
 
 concurrency:
   group: harvest
@@ -25,7 +25,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        site: [galaxynovels, fanmtl, wuxiaworldsite]
+        include:
+          - { site: galaxynovels, shard: 0 }
+          - { site: galaxynovels, shard: 1 }
+          - { site: fanmtl, shard: 0 }
+          - { site: fanmtl, shard: 1 }
+          - { site: wuxiaworldsite, shard: 0 }
+          - { site: wuxiaworldsite, shard: 1 }
     steps:
       - uses: actions/checkout@v4
 
@@ -43,13 +49,16 @@ jobs:
           mkdir -p ~/.config/rclone
           printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
-          rclone about gdrive: --bind 0.0.0.0 | head -3
+          rclone lsd gdrive: --bind 0.0.0.0 | head -3
 
       - name: harvest
         env:
           RCLONE_REMOTE: gdrive
+          SITE: ${{ matrix.site }}
+          SHARD: ${{ matrix.shard }}
+          REQ: ${{ github.event.inputs.site }}
+          BUDGET: ${{ github.event.inputs.budget || '330' }}
         run: |
-          if [ -n "${{ github.event.inputs.site }}" ] && [ "${{ github.event.inputs.site }}" != "${{ matrix.site }}" ]; then
-            echo "skipping ${{ matrix.site }}"; exit 0
-          fi
-          PYTHONPATH=harvest python3 harvest/runner.py --site "${{ matrix.site }}" --budget-min "${{ github.event.inputs.budget || '300' }}"
+          if [ -n "$REQ" ] && [ "$REQ" != "$SITE" ]; then echo "skip $SITE"; exit 0; fi
+          echo "$SITE shard $SHARD for $BUDGET min"
+          PYTHONPATH=harvest python3 harvest/runner.py --site "$SITE" --worker "$SHARD" --of 2 --budget-min "$BUDGET"
