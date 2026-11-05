@@ -158,6 +158,26 @@ def improve(key: str, en: list[str], ar: list[str], meter: Meter) -> list[str]:
     return out
 
 
+def dedupe(paras: list[str]) -> list[str]:
+    """Drop paragraphs that restate an earlier one.
+
+    A chunk whose Arabic has more paragraphs than its English slice makes the model pad, and the padding
+    is a re-wording of a sentence it already produced. Caught once on Shadow Slave ch1: paragraphs 12-14
+    were paragraphs 8-10 said again.
+    """
+    seen: list[str] = []
+    out: list[str] = []
+    for p in paras:
+        norm = re.sub(r"[^\w\s]", "", p)[:90].strip()
+        if not norm:
+            continue
+        if any(norm in s or s in norm for s in seen if len(s) > 40):
+            continue
+        seen.append(norm)
+        out.append(p)
+    return out
+
+
 def metrics(ar: list[str], after: list[str]) -> dict:
     def kan(p):
         txt = " ".join(p)
@@ -228,6 +248,7 @@ def main() -> int:
                                     meter))
         if len(reviewed) != len(draft):
             reviewed = draft
+        reviewed = dedupe(reviewed) or reviewed
         m = metrics(ar, reviewed)
         (d / "ar-after.txt").write_text("\n\n".join(reviewed), encoding="utf-8", newline="\n")
         (d / "metrics.json").write_text(json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
