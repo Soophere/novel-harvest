@@ -80,6 +80,7 @@ SITES = {
         "chapter_start": "https://sunovels.com/novel/{slug}?activeTab=chapters",
         "chapter_pager": "https://sunovels.com/novel/{slug}?activeTab=chapters&page={page}",
         "chapter_sort": r"/novel/[^/]+/(\d+)$",
+        "catalogue_bad_re": r"/\d+$",
         # chapter-content is wrapped in hex watermarks on this site; paragraph grouping is clean
         "text_class": "",
         "delay": 0.9,
@@ -122,6 +123,8 @@ SITES = {
                       "skip_re": r"/novel/(page|feed)/"},
         "chapter_style": "madara",
         "chapter_re": r"/novel/[^/]+/(?:chapter-)?\d+/?$",
+        # a chapter URL here ends in a bare number; an older sitemap crawl put 9,981 of them in the catalogue
+        "catalogue_bad_re": r"/\d+/?$",
         "text_class": "read-container",
         "delay": 0.9,
     },
@@ -301,6 +304,16 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
         except Exception:
             pass
     novels = data.get("novels") or []
+    bad = cfg.get("catalogue_bad_re")
+    if novels and bad:
+        junk = sum(1 for u in novels if re.search(bad, u))
+        if junk > max(5, len(novels) * 0.05):
+            # This is what happens when the catalogue was built by a different rule: the entries are
+            # chapter URLs, every one of them fetches a page with no chapter list, and the novels they
+            # came from get recorded as "done". Throw the list away and rebuild it.
+            log(f"[{site}] catalogue: {junk}/{len(novels)} entries are chapter URLs - rebuilding")
+            novels = []
+            data = {"site": site, "built": None, "novels": [], "done": False, "next_page": 1}
     if novels:
         log(f"[{site}] catalogue: {len(novels)} known, next page {data.get('next_page')}, done={data.get('done')}")
 
@@ -553,9 +566,17 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             continue
         links = chapter_links(cfg, novel_url, chapters_for(cfg, novel_url, page))
         if not links:
-            log(f"[{site}] no chapters found: {novel_url[:90]}")
-            done.add(novel_url)
-            state["done_novels"] = sorted(done)
+            # Do not record this as finished. A wrong catalogue used to cost whole novels here: each one
+            # was marked done, never retried, and silently missing from the corpus.
+            failed = state.get("failed") or {}
+            failed[novel_url] = failed.get(novel_url, 0) + 1
+            state["failed"] = failed
+            if failed[novel_url] >= 3:
+                log(f"[{site}] no chapters after 3 tries, giving up: {novel_url[:90]}")
+                done.add(novel_url)
+                state["done_novels"] = sorted(done)
+            else:
+                log(f"[{site}] no chapters found (try {failed[novel_url]}/3), will retry: {novel_url[:90]}")
             state["current"] = None
             state_save(key, state, workdir)
             continue
