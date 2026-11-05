@@ -108,23 +108,31 @@ def whoami() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
-def claim(key: str, state: dict, minutes: int, workdir: Path, force: bool = False) -> bool:
-    """Let one machine work a site at a time, and let the other take over when the lease expires.
+def claim(key: str, workdir: Path, wait_min: int = 0, force: bool = False):
+    """Take the site lease, waiting for it if another machine holds it.
 
-    The flat server and the GitHub runner share the same state file in Drive. Whoever holds a live lease
-    works; if it dies without renewing, the other sees an expired lease and continues from the same chapter.
+    Only one machine may work a site: the flat server and the GitHub runner share this lease in Drive.
+    A holder renews it every save; if it dies, the lease expires within 20 minutes and the waiting machine
+    takes over from exactly the same chapter. Returns the fresh state, or None if the wait ran out.
     """
     me = whoami()
-    lease = state.get("lease") or {}
-    now = time.time()
-    if not force and lease.get("owner") and lease["owner"] != me and lease.get("until", 0) > now:
+    deadline = time.time() + wait_min * 60
+    while True:
+        state = state_load(key)
+        lease = state.get("lease") or {}
+        now = time.time()
+        free = (not lease.get("owner")) or lease["owner"] == me or lease.get("until", 0) <= now
+        if force or free:
+            state["lease"] = {"owner": me, "until": now + 20 * 60, "beat": now}
+            state_save(key, state, workdir)
+            log("[%s] lease acquired by %s" % (key, me))
+            return state
         left = int((lease["until"] - now) / 60)
-        log("[%s] lease held by %s for %d more min - standing by" % (key, lease["owner"], left))
-        return False
-    state["lease"] = {"owner": me, "until": now + 20 * 60, "beat": now}
-    state_save(key, state, workdir)
-    log("[%s] lease acquired by %s for %d min" % (key, me, minutes))
-    return True
+        if now >= deadline:
+            log("[%s] still held by %s (%d min left) - giving up" % (key, lease["owner"], left))
+            return None
+        log("[%s] standing by: %s holds it for %d more min" % (key, lease["owner"], left))
+        time.sleep(180)
 
 
 def state_save(key: str, state: dict, workdir: Path) -> None:
@@ -272,8 +280,8 @@ def harvest(site: str, cfg: dict, budget_min: int, worker: int = 0, of: int = 1,
     deadline = time.time() + budget_min * 60
 
     key = f"{site}-{worker}of{of}"
-    state = state_load(key)
-    if not claim(key, state, 20, workdir, force=force):
+    state = claim(key, workdir, wait_min=budget_min, force=force)
+    if state is None:
         return
     done = set(state.get("done_novels", []))
     crawl_until = time.time() + budget_min * 60 * 0.2
