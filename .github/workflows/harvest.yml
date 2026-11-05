@@ -25,13 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { site: galaxynovels, shard: 0 }
-          - { site: galaxynovels, shard: 1 }
-          - { site: fanmtl, shard: 0 }
-          - { site: fanmtl, shard: 1 }
-          - { site: wuxiaworldsite, shard: 0 }
-          - { site: wuxiaworldsite, shard: 1 }
+        site: [galaxynovels, fanmtl, wuxiaworldsite]
     steps:
       - uses: actions/checkout@v4
 
@@ -55,10 +49,9 @@ jobs:
         env:
           RCLONE_REMOTE: gdrive
           SITE: ${{ matrix.site }}
-          SHARD: ${{ matrix.shard }}
           REQ: ${{ github.event.inputs.site }}
           BUDGET: ${{ github.event.inputs.budget || '330' }}
         run: |
           if [ -n "$REQ" ] && [ "$REQ" != "$SITE" ]; then echo "skip $SITE"; exit 0; fi
-          echo "$SITE shard $SHARD for $BUDGET min"
-          PYTHONPATH=harvest python3 harvest/runner.py --site "$SITE" --worker "$SHARD" --of 2 --budget-min "$BUDGET"
+          echo "$SITE for $BUDGET min (one worker per site; this job stands by while the flat server holds the lease)"
+          PYTHONPATH=harvest python3 harvest/runner.py --site "$SITE" --budget-min "$BUDGET"
