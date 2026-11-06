@@ -805,6 +805,31 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
                 manifest = {c["file"]: c for c in json.loads(manifest_path.read_text(encoding="utf-8")).get("chapters", [])}
             except Exception:
                 manifest = {}
+        if not manifest:
+            # This machine's workdir is empty for this novel (fresh container, or the other machine wrote
+            # it). Without the remote index the "did this novel finish?" test only sees what this run
+            # wrote, which is how a novel with 1,045 chapters already on Drive was reported as 2,104/3,149.
+            try:
+                remote_index = rclone("cat", f"{REMOTE}:novels/{cfg['lang']}/{site}/{slug}/index.json", timeout=90)
+                manifest = {c["file"]: c for c in json.loads(remote_index).get("chapters", [])}
+                if manifest:
+                    log(f"[{site}] {slug}: {len(manifest)} chapters already on Drive")
+                    manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url,
+                                                         "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
+                                                        ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
+            except Exception:
+                pass
+        # whatever this disk has is real even if Drive was ahead of it, so fold the local files in too
+        for existing in folder.glob("*.txt"):
+            if existing.name not in manifest:
+                try:
+                    first = existing.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0].strip()[:120]
+                except Exception:
+                    first = ""
+                try:
+                    manifest[existing.name] = {"file": existing.name, "chapter": int(existing.stem), "title": first}
+                except ValueError:
+                    pass
 
         # Eight chapters are in flight at once. The site still sees a steady ceiling (cfg['rate'] requests
         # per second, shared by every thread) instead of one request every second per thread.
