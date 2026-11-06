@@ -222,6 +222,9 @@ def get_once(url: str) -> str | None:
     return None
 
 
+LAST_RC = [0]
+
+
 def rclone(*args: str, timeout: int = 300) -> str:
     """Run rclone with a hard wall-clock limit.
 
@@ -236,7 +239,9 @@ def rclone(*args: str, timeout: int = 300) -> str:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         log(f"   rclone {' '.join(args[:2])}: timed out after {timeout}s")
+        LAST_RC[0] = 1
         return ""
+    LAST_RC[0] = r.returncode
     if r.returncode != 0:
         log(f"   rclone {' '.join(args[:2])}: {r.stderr.strip()[:200]}")
     return r.stdout
@@ -260,16 +265,29 @@ def migrate_legacy_file(old: str, new: str) -> None:
     log(f"   moved {old.split('novels/')[-1]} -> {new.split('novels/')[-1]}")
 
 
-def state_load(key: str) -> dict:
+def state_load(key: str) -> dict | None:
+    """None means Drive is unreachable, which is different from "no state yet".
+
+    A machine that cannot reach Drive must not harvest: it cannot save progress, cannot push chapters and
+    cannot hold the lease. The flat server spent 15 minutes per site on this before standing down.
+    """
     name = f"{STATE_DIR}/{key}.json"
     migrate_legacy_file(f"{REMOTE}:novels/state/{key}.json", f"{REMOTE}:novels/{name}")
-    for attempt in range(3):
-        out = rclone("cat", f"{REMOTE}:novels/{name}")
+    for attempt in range(2):
+        out = rclone("cat", f"{REMOTE}:novels/{name}", timeout=90)
         try:
             return json.loads(out)
         except Exception:
-            time.sleep(5 + attempt * 10)
-    log(f"   cannot read state for {key} - treating as unclaimed")
+            if not out.strip():
+                # rclone reported nothing; either the file is absent or the call failed
+                time.sleep(3)
+                continue
+            time.sleep(3)
+    # one last look: is Drive there at all?
+    if not rclone("lsd", f"{REMOTE}:novels/", timeout=90).strip():
+        log(f"   Drive unreachable - standing down on {key}")
+        return None
+    log(f"   no state for {key} yet - starting fresh")
     return {"done_novels": [], "current": None, "lease": None}
 
 
@@ -312,6 +330,8 @@ def claim(key: str, workdir: Path, wait_min: int = 0, force: bool = False):
     deadline = time.time() + wait_min * 60
     while True:
         state = state_load(key)
+        if state is None:
+            return None
         lease = state.get("lease") or {}
         now = time.time()
         free = ((not lease.get("owner")) or lease["owner"] == me or lease.get("until", 0) <= now
@@ -342,12 +362,17 @@ def state_save(key: str, state: dict, workdir: Path) -> None:
     rclone("copyto", str(p), f"{REMOTE}:novels/state/{key}.json")
 
 
-def push(site: str, lang: str, workdir: Path) -> None:
+def push(site: str, lang: str, workdir: Path) -> bool:
     src = workdir / site
-    if src.exists():
-        rclone("copy", str(src), f"{REMOTE}:novels/{lang}/{site}",
-               "--transfers", "4", "--checkers", "8", "--tpslimit", "8",
-               "--fast-list", "--ignore-existing")
+    if not src.exists():
+        return True
+    rclone("copy", str(src), f"{REMOTE}:novels/{lang}/{site}",
+           "--transfers", "4", "--checkers", "8", "--tpslimit", "8",
+           "--fast-list", "--ignore-existing", timeout=1800)
+    if LAST_RC[0] != 0:
+        log(f"   push to {lang}/{site} did not complete - chapters are on local disk only")
+        return False
+    return True
 
 
 def migrate_legacy_lang(site: str, lang: str) -> None:
