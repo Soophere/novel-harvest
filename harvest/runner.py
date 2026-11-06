@@ -337,6 +337,9 @@ def state_save(key: str, state: dict, workdir: Path) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
     rclone("copyto", str(p), f"{REMOTE}:novels/{STATE_DIR}/{key}.json")
+    # While the flat server still runs the pre-underscore build, it looks for state/ and would see a lease
+    # that is never updated - two machines, two leases, one site. Mirror the write until it is redeployed.
+    rclone("copyto", str(p), f"{REMOTE}:novels/state/{key}.json")
 
 
 def push(site: str, lang: str, workdir: Path) -> None:
@@ -486,6 +489,7 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
                      "built": time.strftime("%Y-%m-%d %H:%M:%S")})
         p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
         rclone("copyto", str(p), f"{REMOTE}:novels/{CATALOGUE_DIR}/{site}.json")
+        rclone("copyto", str(p), f"{REMOTE}:novels/catalogue/{site}.json")  # mirror, see state_save
 
     if c["type"] == "sitemap":
         if not novels:
