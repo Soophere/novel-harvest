@@ -383,7 +383,8 @@ def read_json_remote(name: str) -> dict:
 
 
 def write_json_remote(name: str, data: dict) -> None:
-    tmp = Path("/tmp") / name.replace("/", "-")
+    import tempfile
+    tmp = Path(tempfile.gettempdir()) / name.replace("/", "-")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
     rclone("copyto", str(tmp), f"{REMOTE}:novels/{name}")
 
@@ -738,7 +739,22 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
         page = get(novel_url)
         if not page:
             continue
-        links = chapter_links(cfg, novel_url, chapters_for(cfg, novel_url, page))
+        slug = slugify(novel_url)
+        folder = novel_dir / slug
+        folder.mkdir(parents=True, exist_ok=True)
+        list_cache = folder / "_links.json"
+        links: list[str] = []
+        if list_cache.exists() and time.time() - list_cache.stat().st_mtime < 7 * 86400:
+            try:
+                links = json.loads(list_cache.read_text(encoding="utf-8"))
+            except Exception:
+                links = []
+        if not links:
+            links = chapter_links(cfg, novel_url, chapters_for(cfg, novel_url, page))
+            if links:
+                list_cache.write_text(json.dumps(links), encoding="utf-8", newline="\n")
+        else:
+            links = chapter_links(cfg, novel_url, links) if cfg.get("fetch_url") else links
         if start_from > len(links):
             # the chapter list shrank since the resume point was written; start this folder again
             start_from = 1
@@ -757,9 +773,6 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             state["current"] = None
             state_save(key, state, workdir)
             continue
-        slug = slugify(novel_url)
-        folder = novel_dir / slug
-        folder.mkdir(parents=True, exist_ok=True)
         manifest_path = folder / "index.json"
         manifest = {}
         if manifest_path.exists():
@@ -829,6 +842,9 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             state["lease"] = {"owner": None, "until": 0, "beat": time.time()}
             state_save(key, state, workdir)
             push(site, cfg["lang"], workdir)
+            total = sum(sum(1 for _ in d.glob("*.txt")) for d in novel_dir.iterdir() if d.is_dir())
+            update_root_index(site, cfg, len(novels), total, len(done), "partial",
+                              f"budget cut at {slug} chapter {stopped_at + 1}")
             log(f"[{site}] budget reached mid-novel {slug} at chapter {stopped_at + 1}")
             return
 
