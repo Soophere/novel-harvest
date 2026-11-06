@@ -26,9 +26,12 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -54,7 +57,7 @@ SITES = {
         # this site lists newest-first
         "chapter_sort": r"/chapter-(\d+)/",
         "text_class": "article",
-        "delay": 1.0,
+        "rate": 6,
     },
     "novltime": {
         "lang": "arabic",
@@ -68,7 +71,7 @@ SITES = {
         "chapter_total_re": r"الفصل\s*\d+\s*من\s*(\d+)",
         # the class this site uses is on every wrapper, so it drags the header in: paragraphs are clean
         "text_class": "",
-        "delay": 0.8,
+        "rate": 8,
     },
     "sunovels": {
         "lang": "arabic",
@@ -83,7 +86,7 @@ SITES = {
         "catalogue_bad_re": r"/\d+$",
         # chapter-content is wrapped in hex watermarks on this site; paragraph grouping is clean
         "text_class": "",
-        "delay": 0.9,
+        "rate": 5,
     },
     "kolnovel": {
         "lang": "arabic",
@@ -92,7 +95,7 @@ SITES = {
                       "prefix": "https://kolnovel.com/sitemap", "max_pages": 200},
         "chapter_re": r"/chapter-\d+/?$",
         "text_class": "entry-content",
-        "delay": 0.8,
+        "rate": 8,
     },
     "wuxiadreams": {
         "lang": "english",
@@ -102,7 +105,7 @@ SITES = {
         "chapter_re": r"/novel/[^/]+/chapter-\d+$",
         "chapter_pager": "https://wuxiadreams.com/novel/{slug}?page={page}",
         "chapter_sort": r"/chapter-(\d+)$",
-        "delay": 0.7,
+        "rate": 6,
     },
     "fanmtl": {
         "lang": "english",
@@ -113,7 +116,7 @@ SITES = {
         "chapter_style": "sequential",
         "chapter_pager": "https://www.fanmtl.com/e/extend/fy.php?page={page}&wjm={slug}",
         "text_class": "chapter-content",
-        "delay": 0.7,
+        "rate": 6,
     },
     "wuxiaworldsite": {
         "lang": "english",
@@ -126,7 +129,7 @@ SITES = {
         # a chapter URL here ends in a bare number; an older sitemap crawl put 9,981 of them in the catalogue
         "catalogue_bad_re": r"/\d+/?$",
         "text_class": "read-container",
-        "delay": 0.9,
+        "rate": 5,
     },
     "novelfire": {
         "lang": "english",
@@ -137,7 +140,7 @@ SITES = {
         "chapter_pager": "https://novelfire.net/book/{slug}/chapters?page={page}",
         "chapter_sort": r"/chapter-(\d+)$",
         "fetch_url": "https://novelphoenix.com/novel/{slug}/chapter-{n}?noti=1",
-        "delay": 0.8,
+        "rate": 8,
     },
 }
 
@@ -151,6 +154,28 @@ SLOTS = {"galaxynovels": 0, "fanmtl": 1, "wuxiaworldsite": 2}
 
 def log(*a):
     print(*a, flush=True)
+
+
+class Rate:
+    """One request slot every 1/rate seconds, shared by every thread working this site.
+
+    Politeness has to be a property of the *site*, not of each thread: eight threads each sleeping a
+    second would hit the server eight times a second. A worker waits for the next slot and then fires.
+    """
+
+    def __init__(self, per_second: float):
+        self.gap = 1.0 / max(0.1, per_second)
+        self.next = 0.0
+        self.lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self.lock:
+            now = time.time()
+            slot = max(now, self.next)
+            self.next = slot + self.gap
+            delay = slot - now
+        if delay > 0:
+            time.sleep(delay)
 
 
 def get(url: str, tries: int = 5) -> str | None:
@@ -178,33 +203,81 @@ def post(url: str, tries: int = 3) -> str | None:
 
 
 def get_once(url: str) -> str | None:
-    """One attempt, no retries: used for chapter-list pagination, where a 404 means "no more pages"."""
-    try:
-        return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=25).read().decode("utf-8", "replace")
-    except Exception:
-        return None
+    """One attempt, except for throttling.
+
+    A 404 means "no more pages" and must not be retried. A 429 means "slow down", and dropping that chapter
+    silently is how a novel ends up half-written, so it is retried with a real backoff.
+    """
+    for attempt in range(3):
+        try:
+            return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=25).read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and attempt < 2:
+                time.sleep(6 * (attempt + 1))
+                continue
+            return None
+        except Exception:
+            return None
+    return None
 
 
-def rclone(*args: str) -> str:
+def rclone(*args: str, timeout: int = 300) -> str:
+    """Run rclone with a hard wall-clock limit.
+
+    The flat server's line drops for minutes at a time. Without a limit, rclone's own retries hang the
+    whole runner: the loop sat in 'rclone cat state/...' for six minutes doing nothing. A killed rclone
+    returns "" and the caller carries on.
+    """
     cmd = ["rclone", *args, "--bind", "0.0.0.0",
+           "--timeout", "60s", "--contimeout", "20s",
            "--config", os.path.expanduser("~/.config/rclone/rclone.conf")]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log(f"   rclone {' '.join(args[:2])}: timed out after {timeout}s")
+        return ""
     if r.returncode != 0:
         log(f"   rclone {' '.join(args[:2])}: {r.stderr.strip()[:200]}")
     return r.stdout
 
 
 def state_load(key: str) -> dict:
-    out = rclone("cat", f"{REMOTE}:novels/state/{key}.json")
-    try:
-        return json.loads(out)
-    except Exception:
-        return {"done_novels": [], "current": None, "lease": None}
+    for attempt in range(3):
+        out = rclone("cat", f"{REMOTE}:novels/state/{key}.json")
+        try:
+            return json.loads(out)
+        except Exception:
+            time.sleep(5 + attempt * 10)
+    log(f"   cannot read state for {key} - treating as unclaimed")
+    return {"done_novels": [], "current": None, "lease": None}
 
 
 def whoami() -> str:
     import socket
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def lease_is_dead(lease: dict, me: str) -> bool:
+    """True when the lease belongs to a process on THIS host that no longer exists.
+
+    The lease is a host:pid string. Without this, restarting the service leaves a 20-minute lease behind
+    that the new process dutifully waits out - the flat server stood still for 16 minutes after one restart.
+    Only the same host is checked; a lease from another machine is always honoured until it expires.
+    """
+    owner = lease.get("owner") or ""
+    if not owner or owner == me:
+        return False
+    host, _, pid = owner.rpartition(":")
+    my_host = me.rpartition(":")[0]
+    if host != my_host or not pid.isdigit():
+        return False
+    try:
+        os.kill(int(pid), 0)          # signal 0 = "does this process exist?"
+        return False
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
 
 
 def claim(key: str, workdir: Path, wait_min: int = 0, force: bool = False):
@@ -220,7 +293,8 @@ def claim(key: str, workdir: Path, wait_min: int = 0, force: bool = False):
         state = state_load(key)
         lease = state.get("lease") or {}
         now = time.time()
-        free = (not lease.get("owner")) or lease["owner"] == me or lease.get("until", 0) <= now
+        free = ((not lease.get("owner")) or lease["owner"] == me or lease.get("until", 0) <= now
+                or lease_is_dead(lease, me))
         if force or free:
             state["lease"] = {"owner": me, "until": now + 20 * 60, "beat": now}
             state_save(key, state, workdir)
@@ -503,7 +577,6 @@ def chapters_for(cfg: dict, novel_url: str, first_page: str) -> list[str]:
             if empty_runs >= 2:
                 break
             continue
-        time.sleep(0.4)
 
     if style == "sequential" and collected:
         m = re.match(r"(https://www\.fanmtl\.com/novel/([a-z0-9\-]+))\.html", novel_url)
@@ -555,8 +628,11 @@ def chapter_body(cfg: dict, html: str) -> tuple[str, str]:
 # Harvest one site
 # --------------------------------------------------------------------------- #
 def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force: bool = False,
-            hard_deadline: float | None = None, wait_min: int | None = None) -> None:
-    workdir = Path("/tmp/work")
+            hard_deadline: float | None = None, wait_min: int | None = None,
+            threads: int = 8) -> None:
+    # The home server keeps this on disk so a restart does not re-download chapters it already wrote;
+    # a GitHub runner has nowhere to keep it and uses /tmp.
+    workdir = Path(os.environ.get("HARVEST_WORK", "/tmp/work"))
     novel_dir = workdir / site
     novel_dir.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + budget_min * 60
@@ -576,11 +652,16 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
     todo = [n for n in novels if n not in done]
     if limit_novels:
         todo = todo[:limit_novels]
-    log(f"[{site}] catalogue {len(novels)} - todo {len(todo)} - budget {budget_min} min")
+    log(f"[{site}] catalogue {len(novels)} - todo {len(todo)} - budget {budget_min} min - "
+                          f"{threads} threads, {cfg.get('rate', 6)} req/s cap")
     written = 0
     last_push = time.time()
+    limiter = Rate(cfg.get("rate", 6))
+    write_lock = threading.Lock()
+    counter = [0]
 
     for novel_url in todo:
+        counter[0] = 0
         if time.time() > deadline:
             log(f"[{site}] budget reached")
             break
@@ -590,6 +671,9 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
         if not page:
             continue
         links = chapter_links(cfg, novel_url, chapters_for(cfg, novel_url, page))
+        if start_from > len(links):
+            # the chapter list shrank since the resume point was written; start this folder again
+            start_from = 1
         if not links:
             # Do not record this as finished. A wrong catalogue used to cost whole novels here: each one
             # was marked done, never retried, and silently missing from the corpus.
@@ -616,52 +700,89 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             except Exception:
                 manifest = {}
 
-        for i in range(start_from - 1, len(links)):
-            if time.time() > deadline:
-                state["current"] = {"novel": novel_url, "chapter": i + 1}
-                # Release the lease on the way out. state_save renews it, and a worker that has stopped
-                # must not hold the site: the next run stands by three minutes, sees a live lease and
-                # skips the site entirely. That cost run 42113881975 its whole galaxynovels share.
-                state_save(key, state, workdir)
-                state["lease"] = {"owner": None, "until": 0, "beat": time.time()}
-                state_save(key, state, workdir)
-                push(site, cfg["lang"], workdir)
-                log(f"[{site}] budget reached mid-novel {slug} at chapter {i + 1}")
-                return
+        # Eight chapters are in flight at once. The site still sees a steady ceiling (cfg['rate'] requests
+        # per second, shared by every thread) instead of one request every second per thread.
+        def fetch_one(i: int) -> bool:
             f = folder / f"{i + 1:04d}.txt"
-            if not f.exists():
-                raw = get_once(links[i]) if cfg.get("fetch_url") else get(links[i])
-                if not raw:
-                    continue
-                title, body = chapter_body(cfg, raw)
-                paras = [x for x in body.split("\n\n") if x.strip()]
-                if len(paras) < 3:
-                    continue
-                f.write_text((title or f"{slug} {i + 1}") + "\n\n" + "\n\n".join(paras) + "\n",
-                             encoding="utf-8", newline="\n")
+            if f.exists():
+                return False
+            limiter.wait()
+            raw = get_once(links[i]) if cfg.get("fetch_url") else get(links[i], tries=2)
+            if not raw:
+                return False
+            title, body = chapter_body(cfg, raw)
+            paras = [x for x in body.split("\n\n") if x.strip()]
+            if len(paras) < 3:
+                return False
+            f.write_text((title or f"{slug} {i + 1}") + "\n\n" + "\n\n".join(paras) + "\n",
+                         encoding="utf-8", newline="\n")
+            with write_lock:
                 manifest[f.name] = {"file": f.name, "chapter": i + 1, "title": (title or "")[:120]}
-                written += 1
-                time.sleep(cfg.get("delay", 1.0))
-            if written and written % 25 == 0 and time.time() - last_push > 240:
-                manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url,
-                                                     "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
-                                                    ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
-                push(site, cfg["lang"], workdir)
-                state["current"] = {"novel": novel_url, "chapter": i + 2}
-                state_save(key, state, workdir)
-                last_push = time.time()
-                log(f"[{site}] pushed {written} so far (at {slug} ch{i + 1})")
+                counter[0] += 1
+            return True
+
+        # A rolling window, not batches: a finished chapter is replaced immediately, so no worker ever
+        # sits idle waiting for the slowest member of its batch.
+        stopped_at = None
+        pending = {}
+        idx = start_from - 1
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            while True:
+                while (len(pending) < threads * 2 and idx < len(links) and time.time() <= deadline):
+                    pending[pool.submit(fetch_one, idx)] = idx
+                    idx += 1
+                if not pending:
+                    break
+                done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    pending.pop(fut, None)
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        log(f"[{site}] chapter error: {type(e).__name__}: {e}")
+                if time.time() - last_push > 240:
+                    manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url,
+                                                         "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
+                                                        ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
+                    push(site, cfg["lang"], workdir)
+                    state["current"] = {"novel": novel_url, "chapter": min(idx + 1, len(links))}
+                    state_save(key, state, workdir)
+                    last_push = time.time()
+                    log(f"[{site}] pushed {counter[0]} so far (at {slug} ch{min(idx, len(links))})")
+                if time.time() > deadline and not pending:
+                    break
+            if idx < len(links):
+                stopped_at = idx
+
+        written = counter[0]
+        if stopped_at is not None:
+            state["current"] = {"novel": novel_url, "chapter": stopped_at + 1}
+            state_save(key, state, workdir)
+            state["lease"] = {"owner": None, "until": 0, "beat": time.time()}
+            state_save(key, state, workdir)
+            push(site, cfg["lang"], workdir)
+            log(f"[{site}] budget reached mid-novel {slug} at chapter {stopped_at + 1}")
+            return
 
         manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url,
                                              "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
                                             ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
+        have = len(manifest)
+        if have < len(links) * 0.9:
+            # half a novel is not a finished novel. Leave it out of done_novels so the next lap fills the gaps.
+            log(f"[{site}] {slug}: only {have}/{len(links)} chapters written - will retry, not marking done")
+            state["current"] = {"novel": novel_url, "chapter": 1}
+            state_save(key, state, workdir)
+            push(site, cfg["lang"], workdir)
+            last_push = time.time()
+            continue
         done.add(novel_url)
         state["done_novels"] = sorted(done)
         state["current"] = None
         state_save(key, state, workdir)
         push(site, cfg["lang"], workdir)
         last_push = time.time()
-        log(f"[{site}] novel done: {slug} ({len(links)} chapters) - total written {written}")
+        log(f"[{site}] novel done: {slug} ({have}/{len(links)} chapters) - written this run {written}")
 
     push(site, cfg["lang"], workdir)
     write_site_manifest(site, cfg, workdir, len(novels))
@@ -670,7 +791,7 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
     log(f"[{site}] run finished - written {written} - novels done {len(done)}/{len(novels)}")
 
 
-def run_all(sites: list[str], budget_min: int, force: bool) -> None:
+def run_all(sites: list[str], budget_min: int, force: bool, threads: int = 4) -> None:
     """Harvest several sites back to back inside one job, sharing the budget.
 
     The workflow matrix has one job per site. A site must never need a workflow-file edit (that needs a
@@ -687,29 +808,33 @@ def run_all(sites: list[str], budget_min: int, force: bool) -> None:
         share = max(10, left_min // (len(sites) - i))
         log(f"[rotate] {site}: {share} min of {left_min} left")
         try:
-            harvest(site, SITES[site], share, force=force, hard_deadline=hard, wait_min=3)
+            harvest(site, SITES[site], share, force=force, hard_deadline=hard, wait_min=3, threads=threads)
         except Exception as e:
             log(f"[rotate] {site} failed: {type(e).__name__}: {e}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--site", required=True, choices=list(SLOTS))
+    ap.add_argument("--site", required=True, choices=list(SITES))
     ap.add_argument("--budget-min", type=int, default=300)
     ap.add_argument("--limit-novels", type=int, default=0)
     ap.add_argument("--force", action="store_true", help="take the lease even if another machine holds it")
+    ap.add_argument("--threads", type=int, default=4, help="chapters fetched in parallel (the flat server can do 8-16)")
+    ap.add_argument("--wait-min", type=int, default=0,
+                    help="minutes to stand by for a lease before skipping the site (0 = use the budget)")
     ap.add_argument("--only", action="store_true",
                     help="harvest just this one site instead of this job's whole rotation slot")
     ap.add_argument("--all", action="store_true", help=argparse.SUPPRESS)  # kept so old commands still run
     args = ap.parse_args()
 
-    if args.only:
-        harvest(args.site, SITES[args.site], args.budget_min, limit_novels=args.limit_novels, force=args.force)
+    if args.only or args.site not in SLOTS:
+        harvest(args.site, SITES[args.site], args.budget_min, limit_novels=args.limit_novels,
+                force=args.force, wait_min=args.wait_min or None, threads=args.threads)
         return
     slot = SLOTS[args.site]
     mine = [s for i, s in enumerate(ROTATION) if i % len(SLOTS) == slot]
     rotate = [args.site] + [s for s in mine if s != args.site]
-    run_all(rotate, args.budget_min, args.force)
+    run_all(rotate, args.budget_min, args.force, threads=args.threads)
 
 
 if __name__ == "__main__":
