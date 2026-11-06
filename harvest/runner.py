@@ -446,6 +446,20 @@ def update_root_index(site: str, cfg: dict, novels_known: int, chapters: int, no
     write_json_remote("_health.json", health)
 
 
+def push_novel(site: str, lang: str, workdir: Path, slug: str) -> None:
+    """Copy ONE novel to Drive instead of the whole site.
+
+    The old push rescanned every file under the site on every checkpoint: with 300 novels that is a full
+    directory comparison against Drive every four minutes, and on this line it was the difference between
+    ~10 chapters a minute and the site's own limit.
+    """
+    src = workdir / site / slug
+    if src.exists():
+        rclone("copy", str(src), f"{REMOTE}:novels/{lang}/{site}/{slug}",
+               "--transfers", "4", "--checkers", "8", "--tpslimit", "8",
+               "--ignore-existing", timeout=600)
+
+
 def write_site_manifest(site: str, cfg: dict, workdir: Path, novels_known: int) -> None:
     """novels/<lang>/<site>/_site.json — what this folder is and how it was built."""
     src = workdir / site
@@ -853,7 +867,7 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             # it). Without the remote index the "did this novel finish?" test only sees what this run
             # wrote, which is how a novel with 1,045 chapters already on Drive was reported as 2,104/3,149.
             try:
-                remote_index = rclone("cat", f"{REMOTE}:novels/{cfg['lang']}/{site}/{slug}/index.json", timeout=90)
+                remote_index = rclone("cat", f"{REMOTE}:novels/{cfg['lang']}/{site}/{slug}/index.json", timeout=30)
                 manifest = {c["file"]: c for c in json.loads(remote_index).get("chapters", [])}
                 if manifest:
                     log(f"[{site}] {slug}: {len(manifest)} chapters already on Drive")
@@ -920,7 +934,7 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
                     manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url,
                                                          "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
                                                         ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
-                    push(site, cfg["lang"], workdir)
+                    push_novel(site, cfg["lang"], workdir, slug)
                     state["current"] = {"novel": novel_url, "chapter": min(idx + 1, len(links))}
                     state_save(key, state, workdir)
                     last_push = time.time()
@@ -936,7 +950,7 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             state_save(key, state, workdir)
             state["lease"] = {"owner": None, "until": 0, "beat": time.time()}
             state_save(key, state, workdir)
-            push(site, cfg["lang"], workdir)
+            push_novel(site, cfg["lang"], workdir, slug)
             total = sum(sum(1 for _ in d.glob("*.txt")) for d in novel_dir.iterdir() if d.is_dir())
             update_root_index(site, cfg, len(novels), total, len(done), "partial",
                               f"budget cut at {slug} chapter {stopped_at + 1}")
@@ -955,14 +969,14 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             log(f"[{site}] {slug}: only {have}/{len(links)} chapters written - will retry, not marking done")
             state["current"] = {"novel": novel_url, "chapter": 1}
             state_save(key, state, workdir)
-            push(site, cfg["lang"], workdir)
+            push_novel(site, cfg["lang"], workdir, slug)
             last_push = time.time()
             continue
         done.add(novel_url)
         state["done_novels"] = sorted(done)
         state["current"] = None
         state_save(key, state, workdir)
-        push(site, cfg["lang"], workdir)
+        push_novel(site, cfg["lang"], workdir, slug)
         last_push = time.time()
         log(f"[{site}] novel done: {slug} ({have}/{len(links)} chapters) - written this run {written}")
 
