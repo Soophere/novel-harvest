@@ -43,6 +43,12 @@ UA = {
 }
 REMOTE = os.environ.get("RCLONE_REMOTE", "gdrive")
 
+# How many novels of each site to take, from the top of its catalogue. 0 = the whole site.
+# fanmtl and wuxiaworld.site each hold ~9-11 thousand novels averaging 2,500 chapters: harvesting them
+# whole is 39 million chapters and about seven months of continuous work for material nobody reads.
+# 300 each is roughly half a million chapters and about two weeks.
+TOP_N = int(os.environ.get("HARVEST_TOP_N", "300"))
+
 # --------------------------------------------------------------------------- #
 # Site table. Every entry below was proven against the live site on 2026-11-06.
 # --------------------------------------------------------------------------- #
@@ -134,7 +140,7 @@ SITES = {
     "novelfire": {
         "lang": "english",
         "base": "https://novelfire.net",
-        "catalogue": {"type": "listing", "url": "https://novelfire.net/genre-all/sort-new/status-all/all-novel?page={page}",
+        "catalogue": {"type": "listing", "url": "https://novelfire.net/genre-all/sort-popular/status-all/all-novel?page={page}",
                       "re": r'href="(/book/[a-z0-9\-]+)"', "max_pages": 1200},
         "chapter_re": r"/chapter-\d+$",
         "chapter_pager": "https://novelfire.net/book/{slug}/chapters?page={page}",
@@ -514,6 +520,9 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
         log(f"[{site}] catalogue: {len(novels)} known, next page {data.get('next_page')}, done={data.get('done')}")
 
     c = cfg["catalogue"]
+    if TOP_N and len(novels) >= TOP_N and not data.get("done"):
+        data["done"] = True
+        log(f"   catalogue: {len(novels)} known, cap {TOP_N} reached - no more crawling")
 
     def save():
         data.update({"novels": novels, "count": len(novels),
@@ -747,6 +756,8 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
     if hard_deadline:
         crawl_until = min(crawl_until, hard_deadline)
     novels = catalogue(cfg, workdir, site, crawl_until)
+    if TOP_N:
+        novels = novels[:TOP_N]
     todo = [n for n in novels if n not in done]
     if limit_novels:
         todo = todo[:limit_novels]

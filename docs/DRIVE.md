@@ -43,6 +43,14 @@ Machine-owned names start with an underscore so they sort above the corpus in an
 **flat server = primary.** It runs `harvest-runner` and owns every site while its line is up.
 **GitHub Actions = backup.** It only gets a site the flat server is not holding.
 
+## How much of each site
+
+**Top 300 novels per site** (`HARVEST_TOP_N`, default 300). The catalogues hold 613 to 10,895 novels and the
+two big English sites average 2,500 chapters each: harvesting them whole is 39 million chapters and about
+seven months of continuous work. 300 each is roughly half a million chapters, about two weeks, and still
+~2,000 novels of real material. The cap only limits harvesting; the catalogue file keeps every novel it
+found, so the limit can be raised later without re-crawling.
+
 ## What is in here
 
 | language | site | method | chapters verified |
