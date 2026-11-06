@@ -27,6 +27,15 @@ if ($busy.Count -gt 0) {
     exit 0
 }
 
+# GitHub's own cron works now, so this is only a safety net: act only if nothing has started in 5 hours.
+$recent = @($runs | Where-Object {
+    $_.createdAt -and ((Get-Date) - [datetime]$_.createdAt.ToUniversalTime()).TotalHours -lt 5
+})
+if ($recent.Count -gt 0) {
+    Note "a run started within 5h - cron is alive, standing down"
+    exit 0
+}
+
 # quiet hours: the flat server is primary; only step in if it has not pushed for a while
 $out = gh workflow run harvest.yml --repo $repo -f site="" -f budget="55" 2>&1
 if ($LASTEXITCODE -eq 0) { Note "dispatched harvest (55 min)" }

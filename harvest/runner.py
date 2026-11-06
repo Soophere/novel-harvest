@@ -448,11 +448,19 @@ def write_site_manifest(site: str, cfg: dict, workdir: Path, novels_known: int) 
         return
     folders = [d for d in src.iterdir() if d.is_dir()]
     chapters = sum(sum(1 for _ in d.glob("*.txt")) for d in folders)
+    short = 0
+    for d in folders:
+        try:
+            idx = json.loads((d / "index.json").read_text(encoding="utf-8"))
+            if idx.get("expected") and len(idx.get("chapters") or []) < idx["expected"]:
+                short += 1
+        except Exception:
+            pass
     man = {
         "site": site, "language": cfg["lang"], "url": cfg["base"],
         "method": cfg.get("chapter_style", "html"),
         "text_selector": cfg.get("text_class") or "paragraph heuristic",
-        "novels": len(folders), "chapters": chapters,
+        "novels": len(folders), "chapters": chapters, "novels_short": short,
         "catalogue_size": novels_known,
         "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -903,6 +911,9 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
         manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url,
                                              "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
                                             ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
+        manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url, "expected": len(links),
+                                             "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
+                                            ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
         have = len(manifest)
         if have < len(links) * 0.9:
             # half a novel is not a finished novel. Leave it out of done_novels so the next lap fills the gaps.
@@ -937,13 +948,16 @@ def run_all(sites: list[str], budget_min: int, force: bool, threads: int = 4) ->
     sites: the one it is named for first, then the rest. One owner per site still holds, because every
     site keeps its own lease.
     """
-    hard = time.time() + (budget_min - 6) * 60
+    # A GitHub job is the BACKUP. With the default 330-minute budget it held one site for nearly two hours
+    # while the flat server stood by. It now never runs longer than two hours, and never more than 45
+    # minutes on one site, so the primary gets the lease back quickly.
+    hard = time.time() + min(max(budget_min - 6, 10), 120) * 60
     for i, site in enumerate(sites):
         left_min = int((hard - time.time()) / 60)
         if left_min < 10:
             log(f"[rotate] out of time, {len(sites) - i} sites left for the next run")
             break
-        share = max(10, left_min // (len(sites) - i))
+        share = min(45, max(10, left_min // (len(sites) - i)))
         log(f"[rotate] {site}: {share} min of {left_min} left")
         try:
             harvest(site, SITES[site], share, force=force, hard_deadline=hard, wait_min=3, threads=threads)
