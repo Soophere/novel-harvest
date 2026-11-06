@@ -23,6 +23,10 @@ if [ "$(grep -c nameserver /etc/resolv.conf 2>/dev/null)" -lt 2 ]; then
   printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 9.9.9.9\noptions timeout:2 attempts:1 rotate\n' > /etc/resolv.conf
 fi
 
+# Data budget. A chapter page is ~55 KB on the wire for ~6 KB kept, so the rate IS the data bill:
+#   6 req/s  ~ 1.2 GB/hour      2 req/s  ~ 400 MB/hour      1 req/s  ~ 200 MB/hour
+# Set HARVEST_RATE in this file to change it; stop the unit entirely with:  systemctl stop harvest-runner
+export HARVEST_RATE=2
 export HARVEST_WORK=/opt/harvest/work
 cd /opt/harvest || exit 1
 mkdir -p "$HARVEST_WORK" out

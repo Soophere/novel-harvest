@@ -754,7 +754,9 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
                           f"{threads} threads, {cfg.get('rate', 6)} req/s cap")
     written = 0
     last_push = time.time()
-    limiter = Rate(cfg.get("rate", 6))
+    # HARVEST_RATE overrides every site's cap, so the data bill can be dialled down without touching code.
+    # Each chapter page is ~55 KB while only ~6 KB is kept, so 6 req/s is roughly 1.2 GB an hour.
+    limiter = Rate(float(os.environ.get("HARVEST_RATE", cfg.get("rate", 6))))
     write_lock = threading.Lock()
     counter = [0]
 
