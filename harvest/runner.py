@@ -814,8 +814,10 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
                     idx += 1
                 if not pending:
                     break
-                done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
-                for fut in done:
+                # 'finished', not 'done': the outer 'done' is the set of finished novels, and shadowing it
+                # here replaced it with completed futures -> "TypeError: '<' not supported between Future and str"
+                finished, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                for fut in finished:
                     pending.pop(fut, None)
                     try:
                         fut.result()
