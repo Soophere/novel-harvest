@@ -47,9 +47,12 @@ Rules, in order of importance:
 4. Keep every name, title and term exactly as the draft spells it, unless it is garbled.
 5. Natural Arabic sentence order. Arabic does not need "كان" in front of every past-tense action.
 6. Dialogue stays dialogue and keeps its tone. No added honorifics, no softening.
-7. Return EXACTLY {n} paragraphs, in the same order, separated by a blank line. No numbering, no notes."""
+7. Return EXACTLY {n} paragraphs, same order, separated by a blank line. No numbering, no notes, and never
+   repeat the draft back. Every sentence of the draft must still be there: this is a rewrite, not a summary.
+8. Do not open sentences with "كان" or "كانت" to render English past tense. Arabic past tense is one word
+   ("ذهب", not "كان قد ذهب"). Use "كان" only where it carries meaning, never as a tense marker."""
 
-REVIEW = """You are reviewing an Arabic novel chapter that was just improved against its English source.
+REVIEW_TEXT = """You are reviewing an Arabic novel chapter that was just improved against its English source.
 
 Check, in this order:
 1. Anything in the English that is missing from the Arabic, or anything in the Arabic that is not in
@@ -135,23 +138,26 @@ def fetch_chapter(site: str, novel_url: str, n: int) -> tuple[str, list[str]]:
 
 
 def improve(key: str, en: list[str], ar: list[str], meter: Meter) -> list[str]:
-    """Paragraph chunks, each with the matching slice of English. Never the whole chapter at once."""
-    n = len(ar)
+    """Chunk the ENGLISH and hand over the whole draft as reference.
+
+    Pairing Arabic paragraphs with English paragraphs by position only works when the two translations cut
+    paragraphs in the same places. chrysalis does not: 34 English paragraphs against 91 Arabic, so the pairs
+    drifted out of step, the model re-translated whatever English it was shown, and "كان" went UP instead of
+    down. Chunking the source and letting the draft guide the wording removes the alignment problem.
+    """
     out: list[str] = []
     CHUNK = 6
-    for start in range(0, n, CHUNK):
-        ar_chunk = ar[start:start + CHUNK]
-        lo = int(start / n * len(en))
-        hi = max(lo + 1, int(min(n, start + CHUNK) / n * len(en)))
-        en_chunk = en[lo:hi] or en[:1]
-        user = ("ENGLISH:\n" + "\n\n".join(en_chunk) +
-                "\n\n---\n\nARABIC DRAFT:\n" + "\n\n".join(ar_chunk))
+    source = "\n\n".join(en)
+    total = max(1, (len(ar) + CHUNK - 1) // CHUNK)
+    for part in range(total):
+        ar_chunk = ar[part * CHUNK:(part + 1) * CHUNK]
+        if not ar_chunk:
+            break
+        user = ("ENGLISH — THE WHOLE CHAPTER, FOR REFERENCE:\n" + source +
+                "\n\n=== REWRITE ONLY THIS ARABIC ===\n"
+                f"(part {part + 1} of {total}, exactly {len(ar_chunk)} paragraphs, same order)\n\n"
+                + "\n\n".join(ar_chunk))
         got = split_paras(chat(key, RULES.replace("{n}", str(len(ar_chunk))), user, meter))
-        if len(got) != len(ar_chunk):
-            fix = (f"That was {len(got)} paragraphs, need exactly {len(ar_chunk)}. "
-                   "Merge or split so the count matches, changing no content.\n\n" +
-                   "\n\n".join(got))
-            got = split_paras(chat(key, RULES.replace("{n}", str(len(ar_chunk))), fix, meter))
         while len(got) < len(ar_chunk):
             got.append(ar_chunk[len(got)])
         out.extend(got[:len(ar_chunk)])
@@ -186,7 +192,11 @@ def metrics(ar: list[str], after: list[str]) -> dict:
         return round(k / max(1, words) * 1000, 1)
 
     changed = sum(1 for a, b in zip(ar, after) if a.strip() != b.strip())
+    words_before = len(" ".join(ar).split())
+    words_after = len(" ".join(after).split())
     return {"paragraphs": len(ar), "paragraphs_after": len(after),
+            "words_before": words_before, "words_after": words_after,
+            "word_ratio": round(words_after / max(1, words_before), 3),
             "kan_per_1000_before": kan(ar), "kan_per_1000_after": kan(after),
             "changed_paragraphs": changed,
             "changed_pct": round(changed / max(1, len(ar)) * 100)}
@@ -197,6 +207,8 @@ def review_sheet(out_dir: Path, title: str, en: list[str], ar: list[str], after:
              f"- paragraphs: {m['paragraphs']} -> {m['paragraphs_after']}",
              f"- changed: {m['changed_paragraphs']} ({m['changed_pct']}%)",
              f"- «كان/كانت» per 1000 words: {m['kan_per_1000_before']} -> {m['kan_per_1000_after']}",
+             f"- words: {m['words_before']} -> {m['words_after']} (ratio {m['word_ratio']})"
+             + ("   ** CONTENT LOST — check before using **" if m["word_ratio"] < 0.8 else ""),
              "", "Read down the three blocks. Anything wrong goes in CORRECTION.", ""]
     n = max(len(ar), len(after))
     for i in range(n):
@@ -243,7 +255,7 @@ def main() -> int:
             continue
         t0 = time.time()
         draft = [apply_style(p) for p in improve(key, en, ar, meter)]
-        reviewed = split_paras(chat(key, REVIEW,
+        reviewed = split_paras(chat(key, REVIEW_TEXT,
                                     "ENGLISH:\n" + "\n\n".join(en) + "\n\n---\n\nARABIC:\n" + "\n\n".join(draft),
                                     meter))
         if len(reviewed) != len(draft):
