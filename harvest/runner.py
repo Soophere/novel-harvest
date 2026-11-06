@@ -233,7 +233,7 @@ def get_once(url: str) -> str | None:
 LAST_RC = [0]
 
 
-def rclone(*args: str, timeout: int = 300) -> str:
+def rclone(*args: str, timeout: int = 300, quiet: bool = False) -> str:
     """Run rclone with a hard wall-clock limit.
 
     The flat server's line drops for minutes at a time. Without a limit, rclone's own retries hang the
@@ -250,7 +250,7 @@ def rclone(*args: str, timeout: int = 300) -> str:
         LAST_RC[0] = 1
         return ""
     LAST_RC[0] = r.returncode
-    if r.returncode != 0:
+    if r.returncode != 0 and not quiet:
         log(f"   rclone {' '.join(args[:2])}: {r.stderr.strip()[:200]}")
     return r.stdout
 
@@ -259,15 +259,15 @@ STATE_DIR = "_state"
 CATALOGUE_DIR = "_catalogue"
 
 
-def migrate_legacy_file(old: str, new: str) -> None:
+def migrate_legacy_file(old: str, new: str, ) -> None:
     """Move a machine file from the old flat name to the underscore one, once.
 
     state/ and catalogue/ used to sit beside the chapter folders. Everything the machines own now starts
     with an underscore, so a listing sorts the machinery to the top and the corpus below it.
     """
-    if rclone("lsf", new).strip():
+    if rclone("lsf", new, quiet=True).strip():
         return
-    if not rclone("lsf", old).strip():
+    if not rclone("lsf", old, quiet=True).strip():
         return
     rclone("copyto", old, new)
     log(f"   moved {old.split('novels/')[-1]} -> {new.split('novels/')[-1]}")
@@ -390,7 +390,7 @@ def migrate_legacy_lang(site: str, lang: str) -> None:
     if lang == "ar":
         return
     legacy = f"{REMOTE}:novels/ar/{site}"
-    if not rclone("lsf", legacy, "--dirs-only", "--max-depth", "1").strip():
+    if not rclone("lsf", legacy, "--dirs-only", "--max-depth", "1", quiet=True).strip():
         return
     log(f"[{site}] migrating legacy novels/ar/{site} -> novels/{lang}/{site}")
     rclone("copy", legacy, f"{REMOTE}:novels/{lang}/{site}",
@@ -563,7 +563,12 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
             # Some APIs paginate by cursor only: novltime answers 400 to ?page=2 and hands out
             # meta.nextCursor instead. The cursor is stored in the catalogue so a resume continues there.
             cursor = data.get("cursor")
-            url = (c["cursor_url"].format(cursor=cursor) if cursor else c["url"].format(page=page))
+            if cursor:
+                url = c["cursor_url"].format(cursor=cursor)
+            else:
+                # a stored next_page is meaningless for a cursor API, and asking for page 2 answers 400
+                page = 1
+                url = c["url"].format(page=1)
             while page <= c.get("max_pages", 500):
                 if crawl_until and time.time() > crawl_until:
                     log(f"   catalogue: time up at page {page} (keeping {len(novels)})")
