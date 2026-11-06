@@ -70,7 +70,9 @@ SITES = {
         "base": "https://novltime.com",
         "catalogue": {"type": "json_list", "url": "https://novltime.com/api/v1/novels?page={page}",
                       "items": "data", "slug": "slug", "url_template": "https://novltime.com/ar/novel/{value}",
-                      "max_pages": 120},
+                      # page=2 is a 400; this API only paginates by cursor
+                      "cursor_url": "https://novltime.com/api/v1/novels?cursor={cursor}",
+                      "cursor_field": "nextCursor", "max_pages": 200},
         "chapter_style": "numeric",
         "chapter_url": "https://novltime.com/ar/novel/{slug}/chapter/chapter-{n}",
         # the chapter page says "الفصل 1 من 50"; that beats anything the novel page renders
@@ -558,15 +560,20 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
             page = int(data.get("next_page") or 1)
             seen = set(novels)
             tpl = c["url_template"]
+            # Some APIs paginate by cursor only: novltime answers 400 to ?page=2 and hands out
+            # meta.nextCursor instead. The cursor is stored in the catalogue so a resume continues there.
+            cursor = data.get("cursor")
+            url = (c["cursor_url"].format(cursor=cursor) if cursor else c["url"].format(page=page))
             while page <= c.get("max_pages", 500):
                 if crawl_until and time.time() > crawl_until:
                     log(f"   catalogue: time up at page {page} (keeping {len(novels)})")
                     break
-                raw = get(c["url"].format(page=page))
+                raw = get(url)
                 if not raw:
                     break
                 try:
-                    items = json.loads(raw).get(c["items"], [])
+                    payload = json.loads(raw)
+                    items = payload.get(c["items"], [])
                 except Exception:
                     break
                 urls = [tpl.format(value=it.get(c["slug"])) for it in items if it.get(c["slug"])]
@@ -579,6 +586,17 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
                 seen.update(new)
                 page += 1
                 data["next_page"] = page
+                if c.get("cursor_url"):
+                    nxt = (payload.get("meta") or {}).get(c.get("cursor_field", "nextCursor"))
+                    if not nxt:
+                        data["done"] = True
+                        log(f"   catalogue: no further cursor at page {page} (total {len(novels)})")
+                        save()
+                        break
+                    data["cursor"] = nxt
+                    url = c["cursor_url"].format(cursor=nxt)
+                else:
+                    url = c["url"].format(page=page)
                 if page % 10 == 0:
                     log(f"   catalogue page {page}: total {len(novels)}")
                     save()
