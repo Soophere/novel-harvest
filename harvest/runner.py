@@ -973,7 +973,7 @@ def main() -> None:
     ap.add_argument("--budget-min", type=int, default=300)
     ap.add_argument("--limit-novels", type=int, default=0)
     ap.add_argument("--force", action="store_true", help="take the lease even if another machine holds it")
-    ap.add_argument("--threads", type=int, default=4, help="chapters fetched in parallel (the flat server can do 8-16)")
+    ap.add_argument("--threads", type=int, default=8, help="chapters fetched in parallel (GitHub runners handle 8)")
     ap.add_argument("--wait-min", type=int, default=0,
                     help="minutes to stand by for a lease before skipping the site (0 = use the budget)")
     ap.add_argument("--only", action="store_true",
