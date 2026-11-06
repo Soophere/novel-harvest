@@ -5,6 +5,8 @@
 # enough for the 20-minute Drive lease to expire, and then it resumes from the same chapter. The lease in
 # novels/state/<site>-0of1.json is the only thing that decides who may work a site.
 #
+# --budget-min 20 : twenty minutes per site per lap, so all seven move every hour instead of one running
+#                   for 45 minutes while six wait.
 # --threads 16  : sixteen chapters in flight; the per-site rate cap in runner.SITES keeps it polite.
 # --wait-min 2  : if the backup is mid-novel here, skip this site and come back next lap.
 # HARVEST_WORK  : chapters already written stay on this disk, so a restart never re-downloads them.
@@ -29,7 +31,7 @@ LOG=/opt/harvest/out/harvest-runner.log
 while true; do
   for site in galaxynovels novltime sunovels wuxiadreams fanmtl wuxiaworldsite novelfire; do
     echo "=== $(date -u +%FT%TZ) $site ===" >> "$LOG"
-    PYTHONPATH=harvest python3 harvest/runner.py --site "$site" --budget-min 45 --threads 16 --wait-min 2 --only \
+    PYTHONPATH=harvest python3 harvest/runner.py --site "$site" --budget-min 20 --threads 16 --wait-min 2 --only \
       >> "$LOG" 2>&1
     sleep 15
   done

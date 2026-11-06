@@ -148,7 +148,8 @@ SITES = {
 # (481 novels, 143k chapters) so it is left out of the rotation and only runs when asked for by name.
 ROTATION = ["galaxynovels", "novltime", "sunovels", "wuxiadreams", "fanmtl", "wuxiaworldsite", "novelfire"]
 
-# which slot each matrix job owns. A job takes its named site first, then the rest of its slot.
+# The GitHub matrix has one job per site and each job also drains a slice of the rest, because the workflow
+# file cannot be edited without the "workflow" token scope. The flat server calls --only --site <name>.
 SLOTS = {"galaxynovels": 0, "fanmtl": 1, "wuxiaworldsite": 2}
 
 
@@ -241,9 +242,29 @@ def rclone(*args: str, timeout: int = 300) -> str:
     return r.stdout
 
 
+STATE_DIR = "_state"
+CATALOGUE_DIR = "_catalogue"
+
+
+def migrate_legacy_file(old: str, new: str) -> None:
+    """Move a machine file from the old flat name to the underscore one, once.
+
+    state/ and catalogue/ used to sit beside the chapter folders. Everything the machines own now starts
+    with an underscore, so a listing sorts the machinery to the top and the corpus below it.
+    """
+    if rclone("lsf", new).strip():
+        return
+    if not rclone("lsf", old).strip():
+        return
+    rclone("copyto", old, new)
+    log(f"   moved {old.split('novels/')[-1]} -> {new.split('novels/')[-1]}")
+
+
 def state_load(key: str) -> dict:
+    name = f"{STATE_DIR}/{key}.json"
+    migrate_legacy_file(f"{REMOTE}:novels/state/{key}.json", f"{REMOTE}:novels/{name}")
     for attempt in range(3):
-        out = rclone("cat", f"{REMOTE}:novels/state/{key}.json")
+        out = rclone("cat", f"{REMOTE}:novels/{name}")
         try:
             return json.loads(out)
         except Exception:
@@ -315,7 +336,7 @@ def state_save(key: str, state: dict, workdir: Path) -> None:
     p = workdir / f"{key}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
-    rclone("copyto", str(p), f"{REMOTE}:novels/state/{key}.json")
+    rclone("copyto", str(p), f"{REMOTE}:novels/{STATE_DIR}/{key}.json")
 
 
 def push(site: str, lang: str, workdir: Path) -> None:
@@ -348,6 +369,47 @@ def migrate_legacy_lang(site: str, lang: str) -> None:
         log(f"[{site}] migrated {src} files, legacy folder removed")
     else:
         log(f"[{site}] migration incomplete ({dst}/{src}) - keeping both, will retry next run")
+
+
+def read_json_remote(name: str) -> dict:
+    out = rclone("cat", f"{REMOTE}:novels/{name}")
+    try:
+        return json.loads(out)
+    except Exception:
+        return {}
+
+
+def write_json_remote(name: str, data: dict) -> None:
+    tmp = Path("/tmp") / name.replace("/", "-")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
+    rclone("copyto", str(tmp), f"{REMOTE}:novels/{name}")
+
+
+def update_root_index(site: str, cfg: dict, novels_known: int, chapters: int, novels_done: int,
+                      status: str, note: str = "") -> None:
+    """_index.json is what a fresh chat reads first: every site, one line each, no directory listing.
+
+    _health.json is the same shape but about the last run only, so a broken site is visible without reading
+    a 40 MB log on another machine.
+    """
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    idx = read_json_remote("_index.json") or {"sites": {}}
+    idx.setdefault("sites", {})[site] = {
+        "language": cfg["lang"], "url": cfg["base"],
+        "method": cfg.get("chapter_style", "html"),
+        "chapters": chapters, "novels_done": novels_done, "catalogue_size": novels_known,
+        "path": f"{cfg['lang']}/{site}/", "updated": now,
+    }
+    idx["updated"] = now
+    write_json_remote("_index.json", idx)
+
+    health = read_json_remote("_health.json") or {"sites": {}}
+    health.setdefault("sites", {})[site] = {
+        "status": status, "note": note, "chapters": chapters,
+        "catalogue_size": novels_known, "last_run": now,
+    }
+    health["updated"] = now
+    write_json_remote("_health.json", health)
 
 
 def write_site_manifest(site: str, cfg: dict, workdir: Path, novels_known: int) -> None:
@@ -394,7 +456,9 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
     """
     p = workdir / f"catalogue-{site}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    rclone("copyto", f"{REMOTE}:novels/catalogue/{site}.json", str(p))
+    migrate_legacy_file(f"{REMOTE}:novels/catalogue/{site}.json",
+                        f"{REMOTE}:novels/{CATALOGUE_DIR}/{site}.json")
+    rclone("copyto", f"{REMOTE}:novels/{CATALOGUE_DIR}/{site}.json", str(p))
     data = {"site": site, "built": None, "novels": [], "done": False, "next_page": 1}
     if p.exists():
         try:
@@ -421,7 +485,7 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
         data.update({"novels": novels, "count": len(novels),
                      "built": time.strftime("%Y-%m-%d %H:%M:%S")})
         p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
-        rclone("copyto", str(p), f"{REMOTE}:novels/catalogue/{site}.json")
+        rclone("copyto", str(p), f"{REMOTE}:novels/{CATALOGUE_DIR}/{site}.json")
 
     if c["type"] == "sitemap":
         if not novels:
@@ -786,9 +850,11 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
 
     push(site, cfg["lang"], workdir)
     write_site_manifest(site, cfg, workdir, len(novels))
+    total = sum(sum(1 for _ in d.glob("*.txt")) for d in novel_dir.iterdir() if d.is_dir())
+    update_root_index(site, cfg, len(novels), total, len(done), "ok")
     state["lease"] = {"owner": None, "until": 0, "beat": time.time()}
     state_save(key, state, workdir)
-    log(f"[{site}] run finished - written {written} - novels done {len(done)}/{len(novels)}")
+    log(f"[{site}] run finished - written {written} - novels done {len(done)}/{len(novels)} - {total} chapters on disk")
 
 
 def run_all(sites: list[str], budget_min: int, force: bool, threads: int = 4) -> None:
@@ -811,6 +877,10 @@ def run_all(sites: list[str], budget_min: int, force: bool, threads: int = 4) ->
             harvest(site, SITES[site], share, force=force, hard_deadline=hard, wait_min=3, threads=threads)
         except Exception as e:
             log(f"[rotate] {site} failed: {type(e).__name__}: {e}")
+            try:
+                update_root_index(site, SITES[site], 0, 0, 0, "error", f"{type(e).__name__}: {e}"[:200])
+            except Exception:
+                pass
 
 
 def main() -> None:
