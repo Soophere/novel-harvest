@@ -583,7 +583,7 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
                     break
                 urls = [tpl.format(value=it.get(c["slug"])) for it in items if it.get(c["slug"])]
                 new = [u for u in urls if u not in seen]
-                if not new:
+                if not new and not c.get("cursor_url"):
                     data["done"] = True
                     log(f"   catalogue finished at page {page} (total {len(novels)})")
                     break
@@ -592,6 +592,9 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
                 page += 1
                 data["next_page"] = page
                 if c.get("cursor_url"):
+                    # A cursor API hands out every result in order: "no new novels on this page" just means
+                    # this page overlapped what we already had, not that the list ended. Only a missing
+                    # cursor ends it.
                     nxt = (payload.get("meta") or {}).get(c.get("cursor_field", "nextCursor"))
                     if not nxt:
                         data["done"] = True
