@@ -891,20 +891,35 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
                 manifest = {c["file"]: c for c in json.loads(manifest_path.read_text(encoding="utf-8")).get("chapters", [])}
             except Exception:
                 manifest = {}
+        remote_dir = f"{REMOTE}:novels/{cfg['lang']}/{site}/{slug}"
         if not manifest:
-            # This machine's workdir is empty for this novel (fresh container, or the other machine wrote
-            # it). Without the remote index the "did this novel finish?" test only sees what this run
-            # wrote, which is how a novel with 1,045 chapters already on Drive was reported as 2,104/3,149.
+            # This machine has no record of this novel (a fresh workdir, or the other machine wrote it).
+            # Without the remote index the "did this novel finish?" test only sees what this run wrote.
             try:
-                remote_index = rclone("cat", f"{REMOTE}:novels/{cfg['lang']}/{site}/{slug}/index.json", timeout=30)
+                remote_index = rclone("cat", f"{remote_dir}/index.json", timeout=30)
                 manifest = {c["file"]: c for c in json.loads(remote_index).get("chapters", [])}
-                if manifest:
-                    log(f"[{site}] {slug}: {len(manifest)} chapters already on Drive")
-                    manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url,
-                                                         "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
-                                                        ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
             except Exception:
                 pass
+        if start_from > len(manifest) + 1:
+            # The resume point is ahead of what this machine can account for, so the files it is about to
+            # skip are on Drive and nowhere else. List the folder - one call - instead of trusting a stale
+            # index.json that a never-finished novel may not have.
+            try:
+                listing = rclone("lsf", remote_dir, "--files-only", timeout=60)
+                for name in listing.splitlines():
+                    name = name.strip()
+                    if name.endswith(".txt") and name not in manifest:
+                        try:
+                            manifest[name] = {"file": name, "chapter": int(name[:4]), "title": ""}
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+        if manifest:
+            log(f"[{site}] {slug}: {len(manifest)} chapters already accounted for")
+            manifest_path.write_text(json.dumps({"novel": slug, "url": novel_url,
+                                                 "chapters": sorted(manifest.values(), key=lambda c: c["file"])},
+                                                ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
         # whatever this disk has is real even if Drive was ahead of it, so fold the local files in too
         for existing in folder.glob("*.txt"):
             if existing.name not in manifest:
