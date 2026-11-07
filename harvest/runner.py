@@ -658,11 +658,15 @@ def catalogue(cfg: dict, workdir: Path, site: str, crawl_until: float | None = N
 # --------------------------------------------------------------------------- #
 # Chapter list
 # --------------------------------------------------------------------------- #
-def chapters_for(cfg: dict, novel_url: str, first_page: str) -> list[str]:
+def chapters_for(cfg: dict, novel_url: str, first_page: str) -> list[str] | None:
     """Return every chapter of a novel, following whatever the site uses to list them.
 
     Most novel sites show only the first ~30 chapters on the novel page, so a single fetch silently
     truncates the book. That was the bug that made every novel stop at 31 chapters.
+
+    Returns None when the chapter-list page could not be fetched at all - the site throttled us, or the
+    line dropped. That is different from [] which means the page arrived and holds no chapters, and the
+    difference is what stops a bad hour from writing off a whole site.
     """
     slug = slugify(novel_url)
     style = cfg.get("chapter_style", "html")
@@ -687,13 +691,17 @@ def chapters_for(cfg: dict, novel_url: str, first_page: str) -> list[str]:
 
     # Madara: one POST returns the complete list, newest first.
     if style == "madara":
-        raw = post(novel_url.rstrip("/") + "/ajax/chapters/") or ""
+        raw = post(novel_url.rstrip("/") + "/ajax/chapters/")
+        if raw is None:
+            return None
         found = links_in(raw)
         found.reverse()
         return sort_chapters(cfg, found)
 
     # numeric: the page renders only the newest ~120 links, but chapter URLs are chapter-{n}
     if style == "numeric":
+        if not first_page:
+            return None
         nums = [int(n) for n in re.findall(r"/chapter-(\d+)", first_page)]
         if cfg.get("chapter_total_re"):
             nums += [int(n) for n in re.findall(cfg["chapter_total_re"], first_page)]
@@ -706,7 +714,10 @@ def chapters_for(cfg: dict, novel_url: str, first_page: str) -> list[str]:
     page = 1
     html = first_page
     if cfg.get("chapter_start"):
-        html = get(cfg["chapter_start"].format(slug=slug, novel=novel_url.rstrip("/"))) or first_page
+        got = get(cfg["chapter_start"].format(slug=slug, novel=novel_url.rstrip("/")))
+        if got is None:
+            return None
+        html = got
     empty_runs = 0
     while True:
         found = links_in(html)
@@ -810,6 +821,7 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
     limiter = Rate(float(os.environ.get("HARVEST_RATE", cfg.get("rate", 6))))
     write_lock = threading.Lock()
     counter = [0]
+    blocked = 0
 
     for novel_url in todo:
         counter[0] = 0
@@ -832,7 +844,24 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             except Exception:
                 links = []
         if not links:
-            links = chapter_links(cfg, novel_url, chapters_for(cfg, novel_url, page))
+            raw_links = chapters_for(cfg, novel_url, page)
+            if raw_links is None:
+                # The site did not answer the chapter list. That is not "this novel has no chapters" and it
+                # must not count against the novel: an hour of throttling once wrote off 299 sunovels novels.
+                blocked += 1
+                log(f"[{site}] chapter list unavailable ({blocked} in a row): {novel_url[:70]}")
+                if blocked >= 8:
+                    log(f"[{site}] stopping this run - the site is not answering chapter lists")
+                    state["current"] = None
+                    state_save(key, state, workdir)
+                    state["lease"] = {"owner": None, "until": 0, "beat": time.time()}
+                    state_save(key, state, workdir)
+                    push(site, cfg["lang"], workdir)
+                    return
+                time.sleep(min(60, 8 * blocked))
+                continue
+            blocked = 0
+            links = chapter_links(cfg, novel_url, raw_links)
             if links:
                 list_cache.write_text(json.dumps(links), encoding="utf-8", newline="\n")
         else:
@@ -847,7 +876,7 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
             failed[novel_url] = failed.get(novel_url, 0) + 1
             state["failed"] = failed
             if failed[novel_url] >= 3:
-                log(f"[{site}] no chapters after 3 tries, giving up: {novel_url[:90]}")
+                log(f"[{site}] the site returned no chapters after 3 tries, writing off: {novel_url[:90]}")
                 done.add(novel_url)
                 state["done_novels"] = sorted(done)
             else:
