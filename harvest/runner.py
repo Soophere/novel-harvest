@@ -869,6 +869,14 @@ def harvest(site: str, cfg: dict, budget_min: int, limit_novels: int = 0, force:
         if start_from > len(links):
             # the chapter list shrank since the resume point was written; start this folder again
             start_from = 1
+        # Never trust a resume point that runs ahead of the chapters we can actually account for. sunovels'
+        # against-the-gods claimed chapter 1373 while only 50 files existed - the rest were written to
+        # /tmp/work by an early build and lost with the container - so 1,300 chapters would have been
+        # skipped for ever.
+        if start_from - 1 > len(manifest):
+            if start_from > 1:
+                log(f"[{site}] {slug}: resume point {start_from} is ahead of {len(manifest)} known chapters - restarting from {len(manifest) + 1}")
+            start_from = len(manifest) + 1
         if not links:
             # Do not record this as finished. A wrong catalogue used to cost whole novels here: each one
             # was marked done, never retried, and silently missing from the corpus.
